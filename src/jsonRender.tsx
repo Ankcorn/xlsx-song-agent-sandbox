@@ -1,5 +1,5 @@
 import { defineCatalog, type Spec } from "@json-render/core";
-import { defineRegistry, Renderer } from "@json-render/react";
+import { JSONUIProvider, Renderer, defineRegistry } from "@json-render/react";
 import { schema } from "@json-render/react/schema";
 import { shadcnComponentDefinitions } from "@json-render/shadcn/catalog";
 import { shadcnComponents } from "@json-render/shadcn";
@@ -153,5 +153,11 @@ const { registry } = defineRegistry(agentReportCatalog, {
 });
 
 export function JsonRenderReport({ spec }: { spec: Spec }) {
-  return <Renderer registry={registry} spec={spec} />;
+  const initialState = typeof spec === "object" && spec && "state" in spec ? (spec as Spec & { state?: Record<string, unknown> }).state : undefined;
+
+  return (
+    <JSONUIProvider registry={registry} initialState={initialState}>
+      <Renderer registry={registry} spec={spec} />
+    </JSONUIProvider>
+  );
 }
