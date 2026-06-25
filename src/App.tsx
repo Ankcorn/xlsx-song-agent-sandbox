@@ -13,18 +13,24 @@ import {
 } from "@tanstack/react-router";
 import {
   ArrowLeft,
+  BarChart3,
+  Clock,
   Database,
   FileSpreadsheet,
   FileText,
+  Gauge,
   PanelRightClose,
   PanelRightOpen,
   Plus,
   Send,
+  Search,
+  Sparkles,
+  Star,
   Table2,
   Trash2,
   Upload,
 } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@cloudflare/kumo/styles/standalone";
 import "./styles.css";
@@ -116,6 +122,41 @@ type RenderedMessage = {
   id: string;
   role: string;
   text: string;
+};
+
+type AgentRequestResponse = {
+  agentName: string;
+  finishReason?: string;
+  model?: {
+    fallbackModels?: Array<{ model: string; provider: string }>;
+    gatewayId?: string;
+    model?: string;
+    provider?: string;
+  };
+  requestId: string;
+  response: string;
+  usage?: Record<string, unknown>;
+};
+
+type BenchmarkRun = {
+  id: string;
+  answer: string;
+  answerSeconds: number;
+  error?: string;
+  finishReason?: string;
+  inputTokens: number | null;
+  modelName: string | null;
+  modelProvider: string | null;
+  prompt: string;
+  quality: number | null;
+  requestId?: string;
+  spreadsheetFilename: string | null;
+  spreadsheetId: string;
+  timestamp: string;
+  totalSeconds: number;
+  totalTokens: number | null;
+  uploadSeconds: number | null;
+  outputTokens: number | null;
 };
 
 function textFromMessage(message: unknown) {
@@ -211,6 +252,31 @@ function cellText(value: unknown) {
   return JSON.stringify(value);
 }
 
+function formatSeconds(seconds: number | null | undefined) {
+  if (seconds === null || seconds === undefined) return "n/a";
+  if (seconds < 10) return `${seconds.toFixed(2)}s`;
+  return `${seconds.toFixed(1)}s`;
+}
+
+function formatNumber(value: number | null | undefined) {
+  return value === null || value === undefined ? "n/a" : value.toLocaleString();
+}
+
+function average(values: Array<number | null | undefined>) {
+  const filtered = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (filtered.length === 0) return null;
+  return filtered.reduce((sum, value) => sum + value, 0) / filtered.length;
+}
+
+function tokenCount(usage: Record<string, unknown> | undefined, keys: string[]) {
+  if (!usage) return null;
+  for (const key of keys) {
+    const value = usage[key];
+    if (typeof value === "number" && Number.isFinite(value)) return Math.round(value);
+  }
+  return null;
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   const data = (await response.json().catch(() => ({}))) as T & { error?: string };
@@ -226,10 +292,16 @@ function RootLayout() {
           <FileSpreadsheet size={22} />
           <span>XLSX Song</span>
         </Link>
-        <Link to="/upload" className="nav-button">
-          <Plus size={18} />
-          <span>Upload</span>
-        </Link>
+        <div className="nav-actions">
+          <Link to="/upload" className="nav-button">
+            <Plus size={18} />
+            <span>Upload</span>
+          </Link>
+          <Link to="/benchmarks" className="nav-button">
+            <BarChart3 size={18} />
+            <span>Benchmarks</span>
+          </Link>
+        </div>
       </nav>
       <Outlet />
     </main>
@@ -1125,6 +1197,340 @@ function DataTable({ columns, rows }: { columns: string[]; rows: Record<string, 
   );
 }
 
+function BenchmarkDashboardPage() {
+  const [file, setFile] = useState<File | null>(null);
+  const [spreadsheetId, setSpreadsheetId] = useState("");
+  const [prompt, setPrompt] = useState("Summarize this spreadsheet and cite the most important rows.");
+  const [preExtract, setPreExtract] = useState(true);
+  const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [runs, setRuns] = useState<BenchmarkRun[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("xlsx-song-benchmark-runs") ?? "[]") as BenchmarkRun[];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    localStorage.setItem("xlsx-song-benchmark-runs", JSON.stringify(runs));
+  }, [runs]);
+
+  const completedRuns = runs.filter((run) => !run.error);
+  const averageAnswerSeconds = average(completedRuns.map((run) => run.answerSeconds));
+  const averageTotalTokens = average(completedRuns.map((run) => run.totalTokens));
+  const averageQuality = average(completedRuns.map((run) => run.quality));
+  const latestRun = completedRuns[0];
+  const tokenPeak = Math.max(1, ...completedRuns.map((run) => run.totalTokens ?? 0));
+  const suggestedPrompts = [
+    "Show the biggest changes in this spreadsheet.",
+    "Which rows look like outliers?",
+    "Summarize totals by category.",
+    "Find the highest value and explain why.",
+  ];
+
+  async function submitBenchmark(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const text = prompt.trim();
+    if (!text || isRunning) return;
+
+    setError(null);
+    setIsRunning(true);
+
+    const totalStarted = performance.now();
+    let uploadSeconds: number | null = null;
+    let targetSpreadsheetId = spreadsheetId.trim();
+    let spreadsheetFilename: string | null = null;
+
+    try {
+      if (file) {
+        const formData = new FormData();
+        formData.append("spreadsheet", file);
+        formData.append("spreadsheetId", crypto.randomUUID());
+        formData.append("preExtract", String(preExtract));
+
+        const uploadStarted = performance.now();
+        const upload = await fetchJson<SpreadsheetResponse>("/api/spreadsheets", {
+          body: formData,
+          method: "POST",
+        });
+        uploadSeconds = (performance.now() - uploadStarted) / 1000;
+        targetSpreadsheetId = upload.spreadsheet.id;
+        spreadsheetFilename = upload.spreadsheet.filename;
+        setSpreadsheetId(targetSpreadsheetId);
+      }
+
+      if (!targetSpreadsheetId) {
+        throw new Error("Choose a spreadsheet file or enter an existing spreadsheet id.");
+      }
+
+      const answerStarted = performance.now();
+      const answer = await fetchJson<AgentRequestResponse>(`/api/spreadsheets/${targetSpreadsheetId}/agent-request`, {
+        body: JSON.stringify({ message: text }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      const answerSeconds = (performance.now() - answerStarted) / 1000;
+      const inputTokens = tokenCount(answer.usage, ["inputTokens", "promptTokens", "prompt_tokens", "input_tokens"]);
+      const outputTokens = tokenCount(answer.usage, ["outputTokens", "completionTokens", "completion_tokens", "output_tokens"]);
+      const reportedTotalTokens = tokenCount(answer.usage, ["totalTokens", "total_tokens"]);
+      const totalTokens = reportedTotalTokens ?? (inputTokens !== null && outputTokens !== null ? inputTokens + outputTokens : null);
+
+      setRuns((current) => [
+        {
+          id: crypto.randomUUID(),
+          answer: answer.response,
+          answerSeconds,
+          finishReason: answer.finishReason,
+          inputTokens,
+          modelName: answer.model?.model ?? null,
+          modelProvider: answer.model?.provider ?? null,
+          outputTokens,
+          prompt: text,
+          quality: null,
+          requestId: answer.requestId,
+          spreadsheetFilename,
+          spreadsheetId: targetSpreadsheetId,
+          timestamp: new Date().toISOString(),
+          totalSeconds: (performance.now() - totalStarted) / 1000,
+          totalTokens,
+          uploadSeconds,
+        },
+        ...current,
+      ]);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Benchmark run failed";
+      setError(message);
+      setRuns((current) => [
+        {
+          id: crypto.randomUUID(),
+          answer: "",
+          answerSeconds: 0,
+          error: message,
+          inputTokens: null,
+          modelName: null,
+          modelProvider: null,
+          outputTokens: null,
+          prompt: text,
+          quality: null,
+          spreadsheetFilename,
+          spreadsheetId: targetSpreadsheetId || "unresolved",
+          timestamp: new Date().toISOString(),
+          totalSeconds: (performance.now() - totalStarted) / 1000,
+          totalTokens: null,
+          uploadSeconds,
+        },
+        ...current,
+      ]);
+    } finally {
+      setIsRunning(false);
+    }
+  }
+
+  function setQuality(runId: string, quality: number) {
+    setRuns((current) => current.map((run) => (run.id === runId ? { ...run, quality } : run)));
+  }
+
+  return (
+    <section className="benchmark-page analytics-page">
+      <aside className="analytics-sidebar">
+        <Link to="/" className="back-link">
+          <ArrowLeft size={18} />
+          <span>Spreadsheets</span>
+        </Link>
+
+        <section className="source-panel">
+          <p className="eyebrow">Data</p>
+          <h2>{file?.name ?? "Spreadsheet agent"}</h2>
+          <label className="benchmark-field">
+            <span>Spreadsheet file</span>
+            <input
+              accept=".xlsx,.xls,.csv,.tsv,.ods,.xml"
+              type="file"
+              onChange={(event) => {
+                setFile(event.target.files?.[0] ?? null);
+                setError(null);
+              }}
+            />
+          </label>
+          <label className="benchmark-field">
+            <span>Spreadsheet id</span>
+            <input value={spreadsheetId} onChange={(event) => setSpreadsheetId(event.target.value)} placeholder="spreadsheet uuid" />
+          </label>
+          <label className="mode-toggle benchmark-toggle">
+            <input checked={preExtract} disabled={isRunning} type="checkbox" onChange={(event) => setPreExtract(event.target.checked)} />
+            <span />
+            <strong>{preExtract ? "SQL knowledge base" : "Raw file only"}</strong>
+          </label>
+        </section>
+
+        <section className="source-panel">
+          <p className="eyebrow">Suggested asks</p>
+          <div className="prompt-chip-list">
+            {suggestedPrompts.map((suggestion) => (
+              <button key={suggestion} type="button" onClick={() => setPrompt(suggestion)}>
+                {suggestion}
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <Button className="clear-button" type="button" onClick={() => setRuns([])} disabled={runs.length === 0} variant="secondary">
+          <Trash2 size={16} />
+          <span>Clear runs</span>
+        </Button>
+      </aside>
+
+      <main className="analytics-main">
+        <header className="analytics-title">
+          <div>
+            <p className="eyebrow">Search analytics</p>
+            <h1>Ask your spreadsheet anything</h1>
+          </div>
+          <div className="model-badge">
+            <Sparkles size={16} />
+            <span>{latestRun ? `${latestRun.modelProvider ?? "model"} · ${latestRun.modelName ?? "unknown"}` : "Awaiting first run"}</span>
+          </div>
+        </header>
+
+        <form className="thoughtspot-search" onSubmit={submitBenchmark}>
+          <Search size={22} />
+          <input value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Ask a question about your spreadsheet..." />
+          <Button
+            className="primary-button"
+            loading={isRunning}
+            type="submit"
+            variant="primary"
+            disabled={isRunning || !prompt.trim()}
+          >
+            <Send size={18} />
+            <span>{isRunning ? "Running" : "Ask"}</span>
+          </Button>
+        </form>
+
+        {error ? <Banner variant="error" title="Benchmark failed" description={error} /> : null}
+
+        <section className="metric-grid">
+          <MetricCard icon={<Gauge size={18} />} label="Runs" value={String(completedRuns.length)} />
+          <MetricCard icon={<Clock size={18} />} label="Avg answer speed" value={formatSeconds(averageAnswerSeconds)} />
+          <MetricCard icon={<BarChart3 size={18} />} label="Avg tokens" value={formatNumber(averageTotalTokens === null ? null : Math.round(averageTotalTokens))} />
+          <MetricCard icon={<Star size={18} />} label="Avg quality" value={averageQuality === null ? "n/a" : `${averageQuality.toFixed(1)}/5`} />
+        </section>
+
+        <section className="answer-canvas">
+          <article className="answer-card">
+            <header>
+              <div>
+                <p className="eyebrow">Answer</p>
+                <h2>{latestRun?.prompt ?? "Run a search to generate an answer"}</h2>
+              </div>
+              {latestRun ? <span className="score-pill">{formatSeconds(latestRun.answerSeconds)}</span> : null}
+            </header>
+            <p>{latestRun?.answer ?? "The answer will appear here with model, token, speed, and quality metrics."}</p>
+          </article>
+
+          <article className="trend-card">
+            <header>
+              <p className="eyebrow">Token trend</p>
+              <h2>Recent runs</h2>
+            </header>
+            <div className="token-bars">
+              {completedRuns.length === 0 ? (
+                <span className="trend-empty">No token data</span>
+              ) : (
+                completedRuns
+                  .slice(0, 8)
+                  .reverse()
+                  .map((run) => (
+                    <div className="token-bar" key={run.id}>
+                      <span style={{ height: `${Math.max(8, ((run.totalTokens ?? 0) / tokenPeak) * 100)}%` }} />
+                      <small>{formatNumber(run.totalTokens)}</small>
+                    </div>
+                  ))
+              )}
+            </div>
+          </article>
+        </section>
+
+        <BenchmarkResults runs={runs} setQuality={setQuality} />
+      </main>
+    </section>
+  );
+}
+
+function MetricCard({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
+  return (
+    <article className="metric-card">
+      <div>{icon}</div>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </article>
+  );
+}
+
+function BenchmarkResults({ runs, setQuality }: { runs: BenchmarkRun[]; setQuality: (runId: string, quality: number) => void }) {
+  if (runs.length === 0) {
+    return (
+      <div className="benchmark-empty">
+        <BarChart3 size={28} />
+        <p>No benchmark runs yet.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="benchmark-table-wrap">
+      <table className="benchmark-table">
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Prompt</th>
+            <th>Model</th>
+            <th>Speed</th>
+            <th>Tokens</th>
+            <th>Quality</th>
+            <th>Answer</th>
+          </tr>
+        </thead>
+        <tbody>
+          {runs.map((run) => (
+            <tr className={run.error ? "failed" : ""} key={run.id}>
+              <td>
+                <strong>{new Date(run.timestamp).toLocaleTimeString()}</strong>
+                <span>{run.spreadsheetFilename ?? run.spreadsheetId}</span>
+              </td>
+              <td>{run.prompt}</td>
+              <td>
+                <strong>{run.modelProvider ?? "n/a"}</strong>
+                <span>{run.modelName ?? "n/a"}</span>
+              </td>
+              <td>
+                <strong>{formatSeconds(run.answerSeconds)}</strong>
+                <span>total {formatSeconds(run.totalSeconds)}</span>
+                {run.uploadSeconds !== null ? <span>upload {formatSeconds(run.uploadSeconds)}</span> : null}
+              </td>
+              <td>
+                <strong>{formatNumber(run.totalTokens)}</strong>
+                <span>in {formatNumber(run.inputTokens)} · out {formatNumber(run.outputTokens)}</span>
+              </td>
+              <td>
+                <div className="quality-buttons" aria-label="Answer quality rating">
+                  {[1, 2, 3, 4, 5].map((score) => (
+                    <button className={run.quality === score ? "active" : ""} key={score} type="button" onClick={() => setQuality(run.id, score)}>
+                      {score}
+                    </button>
+                  ))}
+                </div>
+              </td>
+              <td>{run.error ? <span className="row-error">{run.error}</span> : run.answer}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 const rootRoute = createRootRoute({
   component: RootLayout,
 });
@@ -1141,13 +1547,19 @@ const uploadRoute = createRoute({
   path: "/upload",
 });
 
+const benchmarkRoute = createRoute({
+  component: BenchmarkDashboardPage,
+  getParentRoute: () => rootRoute,
+  path: "/benchmarks",
+});
+
 const spreadsheetRoute = createRoute({
   component: SpreadsheetChatPage,
   getParentRoute: () => rootRoute,
   path: "/spreadsheets/$spreadsheetId",
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, uploadRoute, spreadsheetRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, uploadRoute, benchmarkRoute, spreadsheetRoute]);
 const router = createRouter({ routeTree });
 
 declare module "@tanstack/react-router" {
