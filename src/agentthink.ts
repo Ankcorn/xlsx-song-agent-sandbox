@@ -7,6 +7,7 @@ import { z } from "zod";
 import {
   configuredModelEntries,
   json,
+  jsonRenderResponseInstructions,
   modelConfig,
   parseStringArray,
   providerModel,
@@ -57,6 +58,7 @@ export class AgentThink extends Think<Env> {
       "You may create or restructure derived tables only with the dedicated edit tools. Do not claim the original library sheets were edited.",
       "When citing values, include source spreadsheet/table/source_ref/source_row where possible.",
       "Keep answers concise, concrete, and useful.",
+      jsonRenderResponseInstructions(),
     ].join("\n");
   }
 
@@ -566,4 +568,3 @@ export class AgentThink extends Think<Env> {
     return Date.now() - startedAt;
   }
 }
-

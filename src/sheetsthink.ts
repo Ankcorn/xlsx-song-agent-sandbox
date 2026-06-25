@@ -9,6 +9,7 @@ import {
   configuredModelEntries,
   getSpreadsheetRow,
   json,
+  jsonRenderResponseInstructions,
   listSpreadsheetRevisionRows,
   modelConfig,
   parseJsonText,
@@ -830,6 +831,7 @@ export class SheetsThink extends Think<Env> {
       "Use robust CSV/TSV parsing: sniff delimiters, prefer pandas.read_csv(..., engine='python', on_bad_lines='skip', encoding='utf-8-sig') when using pandas, and fall back to csv.reader for ragged files. Use pandas/openpyxl for XLSX/XLS when useful. For ODS, avoid pandas/odf in constrained sandboxes and prefer lightweight zip/content.xml parsing. Use pandas.read_xml or lxml/ElementTree for XML.",
       "When citing values, include the source_ref/source_row from the generated database where possible.",
       "Keep answers concise, concrete, and useful.",
+      jsonRenderResponseInstructions(),
     ].join("\n");
   }
 

@@ -454,7 +454,7 @@
   }
 
   .message.assistant {
-    @apply self-start;
+    @apply w-full max-w-full self-start;
   }
 
   .message span {
@@ -463,6 +463,10 @@
 
   .message p {
     @apply whitespace-pre-wrap leading-relaxed;
+  }
+
+  .json-render-message {
+    @apply grid gap-4;
   }
 
   .composer {
