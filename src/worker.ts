@@ -1126,6 +1126,8 @@ export class HackathonAgent extends Think<Env> {
       prompt: [
         "You are in codemode. Generate a complete Python script that reads the uploaded spreadsheet at SPREADSHEET_PATH and prints one JSON object to stdout.",
         "Do not explain the code. Return only Python code, with no markdown fences.",
+        "The variable SPREADSHEET_PATH is already defined as the absolute sandbox path. You must read from SPREADSHEET_PATH, not from the filename and not from the current working directory.",
+        "Start by assigning path = pathlib.Path(SPREADSHEET_PATH) or Path(SPREADSHEET_PATH), and use that path variable for every file read.",
         "The script must dynamically extract the spreadsheet into this exact JSON shape:",
         '{"description": string, "filename": string, "format": string, "tables": [{"name": string, "columns": string[], "rows": [{"source_row": number, "source_ref": string, "cells": object}]}]}',
         "Rules:",
