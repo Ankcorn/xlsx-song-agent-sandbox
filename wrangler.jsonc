@@ -19,8 +19,9 @@
     // Set AI_GATEWAY_PROVIDER to "openai" or "anthropic" after adding BYOK provider keys in the AI Gateway dashboard.
     // Use AI_GATEWAY_FALLBACKS for chains like "anthropic:claude-sonnet-4-5,openai:gpt-4.1-mini".
     "AI_GATEWAY_ID": "aigovhack",
-    "AI_GATEWAY_PROVIDER": "workers-ai",
-    "AI_GATEWAY_MODEL": "@cf/moonshotai/kimi-k2.7-code"
+    "AI_GATEWAY_PROVIDER": "openai",
+    "AI_GATEWAY_MODEL": "gpt-4.1-mini",
+    "AI_GATEWAY_FALLBACKS": "openai:gpt-4.1-mini,anthropic:claude-3-5-haiku-latest"
   },
   "d1_databases": [
     {
