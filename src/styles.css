@@ -454,7 +454,7 @@
   }
 
   .message.assistant {
-    @apply w-full max-w-full self-start;
+    @apply w-fit max-w-[min(100%,72rem)] self-start p-5;
   }
 
   .message span {
@@ -466,7 +466,146 @@
   }
 
   .json-render-message {
+    @apply grid w-full min-w-0 gap-5;
+  }
+
+  .llm-report {
+    @apply grid w-full min-w-0 gap-5 text-zinc-900;
+  }
+
+  .llm-report > * {
+    @apply min-w-0;
+  }
+
+  .llm-report h1,
+  .llm-report h2,
+  .llm-report h3 {
+    @apply text-pretty leading-snug;
+  }
+
+  .llm-report p {
+    @apply text-pretty leading-relaxed;
+  }
+
+  .llm-stat-grid {
+    @apply grid gap-4 sm:grid-cols-2 xl:grid-cols-4;
+  }
+
+  .llm-stat-card,
+  .llm-bar-chart,
+  .llm-key-value,
+  .llm-data-table {
+    @apply min-w-0 rounded-xl border border-zinc-200 bg-white shadow-sm;
+  }
+
+  .llm-stat-card {
+    @apply grid gap-3 p-4;
+  }
+
+  .llm-stat-card-header {
+    @apply flex items-start justify-between gap-3;
+  }
+
+  .llm-stat-card-header span {
+    @apply text-sm font-medium leading-snug text-zinc-500;
+  }
+
+  .llm-stat-delta {
+    @apply shrink-0 rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600;
+  }
+
+  .llm-stat-card strong {
+    @apply block text-2xl font-semibold leading-none text-zinc-950;
+  }
+
+  .llm-stat-card p {
+    @apply text-sm leading-relaxed text-zinc-500;
+  }
+
+  .llm-bar-chart,
+  .llm-key-value {
+    @apply p-5;
+  }
+
+  .llm-bar-chart h3,
+  .llm-key-value h3 {
+    @apply mb-4 text-base font-semibold text-zinc-950;
+  }
+
+  .llm-bar-list {
     @apply grid gap-4;
+  }
+
+  .llm-bar-row {
+    @apply grid gap-2.5 rounded-lg border border-zinc-100 bg-zinc-50/70 p-3;
+  }
+
+  .llm-bar-meta {
+    @apply grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-4;
+  }
+
+  .llm-bar-label {
+    @apply min-w-0 text-sm font-semibold leading-snug text-zinc-700 [overflow-wrap:anywhere];
+  }
+
+  .llm-bar-value {
+    @apply whitespace-nowrap font-mono text-xs font-semibold text-zinc-500;
+  }
+
+  .llm-bar-track {
+    @apply h-2.5 overflow-hidden rounded-full bg-zinc-200;
+  }
+
+  .llm-bar-fill {
+    @apply h-full rounded-full bg-zinc-900;
+  }
+
+  .llm-key-value dl {
+    @apply grid gap-3;
+  }
+
+  .llm-key-value dl > div {
+    @apply grid gap-1 border-b border-zinc-100 pb-3 last:border-0 last:pb-0 sm:grid-cols-[180px_minmax(0,1fr)];
+  }
+
+  .llm-key-value dt {
+    @apply text-sm font-medium leading-snug text-zinc-500;
+  }
+
+  .llm-key-value dd {
+    @apply text-sm leading-relaxed text-zinc-800;
+  }
+
+  .llm-data-table {
+    @apply overflow-hidden;
+  }
+
+  .llm-data-table > div {
+    @apply overflow-auto;
+  }
+
+  .llm-data-table table {
+    @apply w-full min-w-[520px] border-collapse text-sm;
+  }
+
+  .llm-data-table thead {
+    @apply bg-zinc-50;
+  }
+
+  .llm-data-table th {
+    @apply border-b border-zinc-200 px-3 py-2.5 text-left text-xs font-semibold leading-snug text-zinc-500;
+  }
+
+  .llm-data-table tr {
+    @apply border-b border-zinc-100 last:border-0;
+  }
+
+  .llm-data-table td {
+    @apply px-3 py-2.5 align-top leading-relaxed text-zinc-700 [overflow-wrap:anywhere];
+  }
+
+  .llm-data-table > p {
+    @apply border-t border-zinc-100 px-3 py-2.5 text-xs leading-relaxed text-zinc-500;
   }
 
   .composer {
