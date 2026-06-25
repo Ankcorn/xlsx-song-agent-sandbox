@@ -134,6 +134,12 @@ type AgentRequestResponse = {
   };
   requestId: string;
   response: string;
+  selectedSpreadsheet?: {
+    filename: string;
+    id: string;
+    reason?: string;
+    score?: number | null;
+  };
   usage?: Record<string, unknown>;
 };
 
@@ -1310,17 +1316,19 @@ function BenchmarkDashboardPage() {
         setSpreadsheetId(targetSpreadsheetId);
       }
 
-      if (!targetSpreadsheetId) {
-        throw new Error("Choose a spreadsheet file or enter an existing spreadsheet id.");
-      }
-
       const answerStarted = performance.now();
-      const answer = await fetchJson<AgentRequestResponse>(`/api/spreadsheets/${targetSpreadsheetId}/agent-request`, {
+      const endpoint = targetSpreadsheetId ? `/api/spreadsheets/${targetSpreadsheetId}/agent-request` : "/api/benchmarks/query";
+      const answer = await fetchJson<AgentRequestResponse>(endpoint, {
         body: JSON.stringify({ message: text }),
         headers: { "content-type": "application/json" },
         method: "POST",
       });
       const answerSeconds = (performance.now() - answerStarted) / 1000;
+      const resolvedSpreadsheetId = answer.selectedSpreadsheet?.id ?? targetSpreadsheetId;
+      const resolvedSpreadsheetFilename = answer.selectedSpreadsheet?.filename ?? spreadsheetFilename;
+      if (answer.selectedSpreadsheet?.id) {
+        setSpreadsheetId(answer.selectedSpreadsheet.id);
+      }
       const inputTokens = tokenCount(answer.usage, ["inputTokens", "promptTokens", "prompt_tokens", "input_tokens"]);
       const outputTokens = tokenCount(answer.usage, ["outputTokens", "completionTokens", "completion_tokens", "output_tokens"]);
       const reportedTotalTokens = tokenCount(answer.usage, ["totalTokens", "total_tokens"]);
@@ -1339,8 +1347,8 @@ function BenchmarkDashboardPage() {
           prompt: text,
           quality: null,
           requestId: answer.requestId,
-          spreadsheetFilename,
-          spreadsheetId: targetSpreadsheetId,
+          spreadsheetFilename: resolvedSpreadsheetFilename,
+          spreadsheetId: resolvedSpreadsheetId,
           timestamp: new Date().toISOString(),
           totalSeconds: (performance.now() - totalStarted) / 1000,
           totalTokens,
@@ -1404,8 +1412,8 @@ function BenchmarkDashboardPage() {
             />
           </label>
           <label className="benchmark-field">
-            <span>Spreadsheet id</span>
-            <input value={spreadsheetId} onChange={(event) => setSpreadsheetId(event.target.value)} placeholder="spreadsheet uuid" />
+            <span>Spreadsheet id override</span>
+            <input value={spreadsheetId} onChange={(event) => setSpreadsheetId(event.target.value)} placeholder="optional uuid" />
           </label>
           <label className="mode-toggle benchmark-toggle">
             <input checked={preExtract} disabled={isRunning} type="checkbox" onChange={(event) => setPreExtract(event.target.checked)} />

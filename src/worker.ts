@@ -68,6 +68,22 @@ type AgentRequestPayload = {
   spreadsheetId?: unknown;
 };
 
+type SpreadsheetSearchCandidate = {
+  columns: string[];
+  description: string | null;
+  filename: string;
+  id: string;
+  rowCount: number;
+  status: string;
+  tables: Array<{
+    columns: string[];
+    name: string;
+    rowCount: number;
+    sourceName: string;
+  }>;
+  updatedAt: string;
+};
+
 type ExtractionWorkflowParams = {
   agentName: string;
   contentType: string;
@@ -533,6 +549,38 @@ function providerModel(providerName: string, modelId: string) {
   );
 }
 
+function gatewayModel(env: Env, entries: Array<{ model: string; provider: string }>) {
+  const gatewayEntries = entries.filter((entry) => entry.provider.toLowerCase() !== "workers-ai");
+  if (!gatewayEntries.length) {
+    throw new Error("No AI Gateway model configured.");
+  }
+
+  const gateway = createAiGateway({
+    binding: env.AI.gateway(env.AI_GATEWAY_ID ?? "default"),
+    options: {
+      collectLog: true,
+      requestTimeoutMs: 120_000,
+      retries: {
+        backoff: "exponential",
+        maxAttempts: 3,
+        retryDelayMs: 750,
+      },
+      skipCache: true,
+    },
+  });
+
+  return gateway(gatewayEntries.map((entry) => providerModel(entry.provider, entry.model)));
+}
+
+function modelForEnv(env: Env) {
+  const entries = configuredModelEntries(env);
+  if (entries[0]?.provider.toLowerCase() === "workers-ai") {
+    return createWorkersAI({ binding: env.AI })(entries[0]?.model ?? "@cf/moonshotai/kimi-k2.7-code");
+  }
+
+  return gatewayModel(env, entries);
+}
+
 function agentNameForSpreadsheet(id: string) {
   return `spreadsheet-${id}`;
 }
@@ -907,7 +955,163 @@ async function sendSpreadsheetAgentRequest(request: Request, env: Env, spreadshe
   return sendAgentMessage(env, spreadsheet.agent_name, body.message);
 }
 
-async function sendAgentMessage(env: Env, agentName: string, message: string) {
+async function sendBenchmarkQuery(request: Request, env: Env) {
+  const body = (await request.json().catch(() => ({}))) as AgentRequestPayload;
+  if (typeof body.message !== "string" || !body.message.trim()) {
+    return json({ error: "Send JSON with a non-empty 'message' string." }, { status: 400 });
+  }
+
+  try {
+    const startedAt = Date.now();
+    const selection = await selectSpreadsheetForPrompt(env, body.message);
+    const notReady = extractionNotReadyResponse(selection.spreadsheet);
+    if (notReady) return notReady;
+
+    const answer = await fetchAgentMessageData(env, selection.spreadsheet.agent_name, body.message);
+    const answerData = answer.data && typeof answer.data === "object" ? answer.data : { response: answer.data };
+    return json(
+      {
+        ...answerData,
+        selectedSpreadsheet: {
+          filename: selection.spreadsheet.filename,
+          id: selection.spreadsheet.id,
+          reason: selection.reason,
+          score: selection.score,
+        },
+        selection: {
+          candidates: selection.candidates,
+          durationMs: selection.durationMs,
+          model: modelConfig(env),
+          reason: selection.reason,
+          score: selection.score,
+          usage: selection.usage,
+        },
+        totalDurationMs: Date.now() - startedAt,
+      },
+      { status: answer.status },
+    );
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "Benchmark query failed." }, { status: 500 });
+  }
+}
+
+async function selectSpreadsheetForPrompt(env: Env, message: string) {
+  const candidates = await spreadsheetSearchCandidates(env);
+  if (candidates.length === 0) {
+    throw new Error("No ready spreadsheets are available to answer this prompt.");
+  }
+
+  if (candidates.length === 1) {
+    return {
+      candidates,
+      durationMs: 0,
+      reason: "Only one ready spreadsheet is available.",
+      score: 1,
+      spreadsheet: (await getSpreadsheetRow(env, candidates[0].id)) as SpreadsheetRow,
+      usage: null as unknown,
+    };
+  }
+
+  const startedAt = Date.now();
+  const result = await generateText({
+    model: modelForEnv(env),
+    prompt: [
+      "Choose the single spreadsheet that is most likely to answer the user's question.",
+      "Return only JSON with keys: spreadsheet_id, reason, score.",
+      "score must be a number from 0 to 1.",
+      "Prefer spreadsheets whose description, table names, columns, or sample metadata match the question.",
+      "",
+      `Question: ${message}`,
+      "",
+      "Spreadsheets:",
+      JSON.stringify(candidates, null, 2),
+    ].join("\n"),
+    temperature: 0,
+  });
+
+  const parsed = parseJsonText(result.text) as {
+    reason?: unknown;
+    score?: unknown;
+    spreadsheet_id?: unknown;
+  };
+  const selectedId = typeof parsed.spreadsheet_id === "string" ? parsed.spreadsheet_id : candidates[0].id;
+  const spreadsheet = await getSpreadsheetRow(env, selectedId);
+  if (!spreadsheet) {
+    throw new Error(`Spreadsheet selector returned unknown id: ${selectedId}`);
+  }
+
+  return {
+    candidates,
+    durationMs: Date.now() - startedAt,
+    reason: typeof parsed.reason === "string" ? parsed.reason : "Selected by spreadsheet metadata.",
+    score: typeof parsed.score === "number" ? Math.max(0, Math.min(1, parsed.score)) : null,
+    spreadsheet,
+    usage: result.usage,
+  };
+}
+
+async function spreadsheetSearchCandidates(env: Env): Promise<SpreadsheetSearchCandidate[]> {
+  const { results } = await env.DB.prepare(
+    [
+      "SELECT id, filename, content_type, size_bytes, agent_name, r2_key, pre_extract, sandbox_path, status, error_message, uploaded_at, updated_at",
+      "FROM spreadsheets",
+      "WHERE status = 'ready'",
+      "ORDER BY updated_at DESC",
+      "LIMIT 40",
+    ].join(" "),
+  ).all<SpreadsheetRow>();
+
+  return Promise.all(
+    (results ?? []).map(async (spreadsheet) => {
+      const candidate: SpreadsheetSearchCandidate = {
+        columns: [],
+        description: null,
+        filename: spreadsheet.filename,
+        id: spreadsheet.id,
+        rowCount: 0,
+        status: spreadsheet.status,
+        tables: [],
+        updatedAt: spreadsheet.updated_at,
+      };
+
+      if (spreadsheet.pre_extract !== 1) {
+        candidate.description = `${spreadsheet.filename} was uploaded without pre-extracted SQL tables.`;
+        return candidate;
+      }
+
+      try {
+        const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(spreadsheet.agent_name));
+        const response = await stub.fetch("https://agent.local/analysis-tables");
+        if (!response.ok) return candidate;
+        const analysis = (await response.json()) as {
+          analysis?: { description?: string | null } | null;
+          tables?: Array<{
+            columns?: string[];
+            row_count?: number;
+            source_name?: string;
+            table_name?: string;
+          }>;
+        };
+
+        candidate.description = analysis.analysis?.description ?? null;
+        candidate.tables = (analysis.tables ?? []).map((table) => ({
+          columns: table.columns ?? [],
+          name: table.table_name ?? "table",
+          rowCount: table.row_count ?? 0,
+          sourceName: table.source_name ?? "sheet",
+        }));
+        candidate.columns = [...new Set(candidate.tables.flatMap((table) => table.columns))].slice(0, 80);
+        candidate.rowCount = candidate.tables.reduce((sum, table) => sum + table.rowCount, 0);
+      } catch {
+        return candidate;
+      }
+
+      return candidate;
+    }),
+  );
+}
+
+async function fetchAgentMessageData(env: Env, agentName: string, message: string) {
   const id = env.HackathonAgent.idFromName(agentName);
   const stub = env.HackathonAgent.get(id);
   const response = await stub.fetch("https://agent.local/api-request", {
@@ -916,11 +1120,16 @@ async function sendAgentMessage(env: Env, agentName: string, message: string) {
     method: "POST",
   });
 
-  const data = await response
+  const data = (await response
     .clone()
     .json()
-    .catch(async () => ({ error: await response.text() }));
-  return json(data, { status: response.status });
+    .catch(async () => ({ error: await response.text() }))) as unknown;
+  return { data, status: response.status };
+}
+
+async function sendAgentMessage(env: Env, agentName: string, message: string) {
+  const { data, status } = await fetchAgentMessageData(env, agentName, message);
+  return json(data, { status });
 }
 
 async function startExtractionWorkflow(env: Env, spreadsheet: SpreadsheetRow) {
@@ -1133,35 +1342,7 @@ export class HackathonAgent extends Think<Env> {
   private turnStartTimes = new Map<string, number>();
 
   getModel() {
-    const entries = configuredModelEntries(this.env);
-    if (entries[0]?.provider.toLowerCase() === "workers-ai") {
-      return createWorkersAI({ binding: this.env.AI })(entries[0]?.model ?? "@cf/moonshotai/kimi-k2.7-code");
-    }
-
-    return this.getGatewayModel(entries);
-  }
-
-  private getGatewayModel(entries: Array<{ model: string; provider: string }>) {
-    const gatewayEntries = entries.filter((entry) => entry.provider.toLowerCase() !== "workers-ai");
-    if (!gatewayEntries.length) {
-      throw new Error("No AI Gateway model configured.");
-    }
-
-    const gateway = createAiGateway({
-      binding: this.env.AI.gateway(this.env.AI_GATEWAY_ID ?? "default"),
-      options: {
-        collectLog: true,
-        requestTimeoutMs: 120_000,
-        retries: {
-          backoff: "exponential",
-          maxAttempts: 3,
-          retryDelayMs: 750,
-        },
-        skipCache: true,
-      },
-    });
-
-    return gateway(gatewayEntries.map((entry) => providerModel(entry.provider, entry.model)));
+    return modelForEnv(this.env);
   }
 
   getSystemPrompt() {
@@ -1898,7 +2079,7 @@ export class HackathonAgent extends Think<Env> {
         const model =
           entry.provider.toLowerCase() === "workers-ai"
             ? createWorkersAI({ binding: this.env.AI })(entry.model)
-            : this.getGatewayModel([entry]);
+            : gatewayModel(this.env, [entry]);
         const result = await generateText({
           model,
           prompt,
@@ -2276,6 +2457,10 @@ export default {
 
     if (url.pathname === "/api/agent/request" && request.method === "POST") {
       return sendAgentRequest(request, env);
+    }
+
+    if (url.pathname === "/api/benchmarks/query" && request.method === "POST") {
+      return sendBenchmarkQuery(request, env);
     }
 
     if (url.pathname === "/api/spreadsheets" && request.method === "GET") {
