@@ -193,6 +193,17 @@ h2 {
   justify-content: center;
   min-height: 180px;
   padding: 22px;
+  text-align: center;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
+}
+
+.file-drop.is-dragging {
+  background: #edf7f5;
+  border-color: #2f6f73;
+  color: #12343b;
 }
 
 .file-drop input {

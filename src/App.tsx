@@ -140,6 +140,31 @@ function UploadPage() {
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+
+  function selectFile(nextFile: File | null) {
+    setFile(nextFile);
+    setError(null);
+  }
+
+  function handleDragOver(event: React.DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragging(true);
+  }
+
+  function handleDragLeave(event: React.DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragging(false);
+  }
+
+  function handleDrop(event: React.DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragging(false);
+    selectFile(event.dataTransfer.files?.[0] ?? null);
+  }
 
   async function submitUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -180,13 +205,18 @@ function UploadPage() {
       </header>
 
       <form className="upload-form" onSubmit={submitUpload}>
-        <label className="file-drop">
+        <label
+          className={`file-drop ${isDragging ? "is-dragging" : ""}`}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
           <Upload size={28} />
-          <span>{file ? file.name : "Choose .xlsx, .xls, .csv, .tsv, .ods, or .xml"}</span>
+          <span>{file ? file.name : "Drop a spreadsheet here or choose .xlsx, .xls, .csv, .tsv, .ods, or .xml"}</span>
           <input
             accept=".xlsx,.xls,.csv,.tsv,.ods,.xml"
             type="file"
-            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            onChange={(event) => selectFile(event.target.files?.[0] ?? null)}
           />
         </label>
 
