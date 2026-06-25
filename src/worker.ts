@@ -25,6 +25,16 @@ type SpreadsheetRow = {
   uploaded_at: string;
 };
 
+type TraceInput = {
+  detail?: unknown;
+  durationMs?: number;
+  requestId?: string;
+  spanType: string;
+  status: "running" | "done" | "error";
+  stepNumber?: number;
+  title: string;
+};
+
 const DEFAULT_SCRIPT = [
   "from datetime import datetime",
   "numbers = [3, 5, 8, 13]",
@@ -83,6 +93,13 @@ function agentNameForSpreadsheet(id: string) {
 
 function spreadsheetIdFromAgentName(agentName: string) {
   return agentName.startsWith("spreadsheet-") ? agentName.slice("spreadsheet-".length) : null;
+}
+
+function safeTraceDetail(detail: unknown) {
+  if (detail === undefined) return null;
+
+  const text = typeof detail === "string" ? detail : JSON.stringify(detail);
+  return text.length > 1800 ? `${text.slice(0, 1800)}...` : text;
 }
 
 function safeFilename(filename: string) {
@@ -181,6 +198,8 @@ async function uploadSpreadsheet(request: Request, env: Env) {
 }
 
 export class HackathonAgent extends Think<Env> {
+  private traceSchemaReady = false;
+
   getModel() {
     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.7-code");
   }
@@ -211,6 +230,177 @@ export class HackathonAgent extends Think<Env> {
         },
       }),
     };
+  }
+
+  async onRequest(request: Request) {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/traces")) {
+      return json({ traces: this.listTraces(url.searchParams.get("since")) });
+    }
+
+    return super.onRequest(request);
+  }
+
+  beforeTurn(ctx: { body?: unknown; messages?: unknown[]; requestId?: string }) {
+    this.recordTrace({
+      detail: { messageCount: ctx.messages?.length ?? 0 },
+      requestId: ctx.requestId,
+      spanType: "turn",
+      status: "running",
+      title: "Agent turn started",
+    });
+  }
+
+  beforeStep(ctx: { stepNumber?: number }) {
+    this.recordTrace({
+      spanType: "step",
+      status: "running",
+      stepNumber: ctx.stepNumber,
+      title: `Step ${ctx.stepNumber ?? "?"} started`,
+    });
+  }
+
+  beforeToolCall(ctx: { input?: unknown; requestId?: string; stepNumber?: number; toolName?: string }) {
+    this.recordTrace({
+      detail: ctx.input,
+      requestId: ctx.requestId,
+      spanType: "tool",
+      status: "running",
+      stepNumber: ctx.stepNumber,
+      title: `Tool ${ctx.toolName ?? "call"} started`,
+    });
+  }
+
+  afterToolCall(ctx: {
+    durationMs?: number;
+    error?: unknown;
+    output?: unknown;
+    requestId?: string;
+    stepNumber?: number;
+    success?: boolean;
+    toolName?: string;
+  }) {
+    this.recordTrace({
+      detail: ctx.success ? ctx.output : ctx.error,
+      durationMs: ctx.durationMs,
+      requestId: ctx.requestId,
+      spanType: "tool",
+      status: ctx.success ? "done" : "error",
+      stepNumber: ctx.stepNumber,
+      title: `Tool ${ctx.toolName ?? "call"} ${ctx.success ? "finished" : "failed"}`,
+    });
+  }
+
+  onStepFinish(ctx: {
+    finishReason?: string;
+    requestId?: string;
+    stepNumber?: number;
+    toolCalls?: unknown[];
+    usage?: unknown;
+  }) {
+    this.recordTrace({
+      detail: {
+        finishReason: ctx.finishReason,
+        toolCalls: ctx.toolCalls?.length ?? 0,
+        usage: ctx.usage,
+      },
+      requestId: ctx.requestId,
+      spanType: "step",
+      status: "done",
+      stepNumber: ctx.stepNumber,
+      title: `Step ${ctx.stepNumber ?? "?"} finished`,
+    });
+  }
+
+  onChatResponse(result: { requestId?: string; status?: string }) {
+    this.recordTrace({
+      detail: result.status,
+      requestId: result.requestId,
+      spanType: "turn",
+      status: "done",
+      title: "Agent turn complete",
+    });
+  }
+
+  onChatError(error: unknown, ctx?: { requestId?: string; stage?: string }) {
+    this.recordTrace({
+      detail: error instanceof Error ? { message: error.message, stage: ctx?.stage } : { error, stage: ctx?.stage },
+      requestId: ctx?.requestId,
+      spanType: "turn",
+      status: "error",
+      title: "Agent turn failed",
+    });
+
+    return error;
+  }
+
+  private ensureTraceSchema() {
+    if (this.traceSchemaReady) return;
+
+    this.sql`
+      CREATE TABLE IF NOT EXISTS agent_traces (
+        id TEXT PRIMARY KEY,
+        request_id TEXT,
+        span_type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        detail TEXT,
+        step_number INTEGER,
+        duration_ms INTEGER,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      )
+    `;
+    this.sql`
+      CREATE INDEX IF NOT EXISTS idx_agent_traces_created_at
+      ON agent_traces (created_at DESC)
+    `;
+    this.traceSchemaReady = true;
+  }
+
+  private listTraces(since?: string | null) {
+    this.ensureTraceSchema();
+    if (since) {
+      return this.sql`
+        SELECT id, request_id, span_type, title, status, detail, step_number, duration_ms, created_at
+        FROM agent_traces
+        WHERE created_at >= ${since}
+        ORDER BY created_at ASC
+        LIMIT 80
+      `;
+    }
+
+    return this.sql`
+      SELECT id, request_id, span_type, title, status, detail, step_number, duration_ms, created_at
+      FROM agent_traces
+      ORDER BY created_at DESC
+      LIMIT 30
+    `.reverse();
+  }
+
+  private recordTrace(input: TraceInput) {
+    this.ensureTraceSchema();
+    this.sql`
+      INSERT INTO agent_traces (
+        id,
+        request_id,
+        span_type,
+        title,
+        status,
+        detail,
+        step_number,
+        duration_ms
+      )
+      VALUES (
+        ${crypto.randomUUID()},
+        ${input.requestId ?? null},
+        ${input.spanType},
+        ${input.title},
+        ${input.status},
+        ${safeTraceDetail(input.detail)},
+        ${input.stepNumber ?? null},
+        ${input.durationMs ?? null}
+      )
+    `;
   }
 }
 
@@ -251,6 +441,18 @@ export default {
           ? body.code
           : "print(open(SPREADSHEET_PATH, 'r', encoding='utf-8').read())";
       return json(await runPython(env, code, spreadsheet));
+    }
+
+    const spreadsheetTraceMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/traces$/);
+    if (spreadsheetTraceMatch && request.method === "GET") {
+      const spreadsheet = await getSpreadsheetRow(env, spreadsheetTraceMatch[1]);
+      if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+
+      const id = env.HackathonAgent.idFromName(spreadsheet.agent_name);
+      const stub = env.HackathonAgent.get(id);
+      const traceUrl = new URL(request.url);
+      traceUrl.pathname = "/traces";
+      return stub.fetch(new Request(traceUrl, request));
     }
 
     const spreadsheetMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)$/);

@@ -32,6 +32,22 @@ type SpreadsheetListResponse = {
   spreadsheets: Spreadsheet[];
 };
 
+type AgentTrace = {
+  id: string;
+  request_id: string | null;
+  span_type: string;
+  title: string;
+  status: "running" | "done" | "error";
+  detail: string | null;
+  step_number: number | null;
+  duration_ms: number | null;
+  created_at: string;
+};
+
+type AgentTraceResponse = {
+  traces: AgentTrace[];
+};
+
 function textFromParts(parts: Array<{ type: string; text?: string }>) {
   return parts
     .filter((part) => part.type === "text")
@@ -43,6 +59,18 @@ function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTraceDetail(detail: string | null) {
+  if (!detail) return null;
+
+  try {
+    const parsed = JSON.parse(detail) as unknown;
+    if (typeof parsed === "string") return parsed;
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return detail;
+  }
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -282,12 +310,36 @@ function ChatSurface({
 }) {
   const agent = useAgent({ agent: "HackathonAgent", name: spreadsheet.agent_name });
   const { messages, sendMessage, status } = useAgentChat({ agent });
+  const [traces, setTraces] = useState<AgentTrace[]>([]);
   const isBusy = status === "submitted" || status === "streaming";
 
   const visibleMessages = useMemo(
     () => messages.filter((message) => textFromParts(message.parts).trim().length > 0),
     [messages],
   );
+
+  useEffect(() => {
+    let isMounted = true;
+    let timeout: number | undefined;
+
+    async function loadTraces() {
+      try {
+        const data = await fetchJson<AgentTraceResponse>(`/api/spreadsheets/${spreadsheet.id}/traces`);
+        if (isMounted) setTraces(data.traces);
+      } finally {
+        if (isMounted) {
+          timeout = window.setTimeout(loadTraces, isBusy ? 900 : 3000);
+        }
+      }
+    }
+
+    loadTraces();
+
+    return () => {
+      isMounted = false;
+      if (timeout) window.clearTimeout(timeout);
+    };
+  }, [isBusy, spreadsheet.id]);
 
   function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -313,20 +365,56 @@ function ChatSurface({
         </div>
       </header>
 
-      <div className="messages">
-        {visibleMessages.length === 0 ? (
-          <div className="empty-state">
-            <FileSpreadsheet size={28} />
-            <p>This spreadsheet has its own retained agent.</p>
-          </div>
-        ) : (
-          visibleMessages.map((message) => (
-            <article className={`message ${message.role}`} key={message.id}>
-              <span>{message.role}</span>
-              <p>{textFromParts(message.parts)}</p>
-            </article>
-          ))
-        )}
+      <div className="chat-main">
+        <div className="messages">
+          {visibleMessages.length === 0 ? (
+            <div className="empty-state">
+              <FileSpreadsheet size={28} />
+              <p>This spreadsheet has its own retained agent.</p>
+            </div>
+          ) : (
+            visibleMessages.map((message) => (
+              <article className={`message ${message.role}`} key={message.id}>
+                <span>{message.role}</span>
+                <p>{textFromParts(message.parts)}</p>
+              </article>
+            ))
+          )}
+        </div>
+
+        <aside className="trace-panel">
+          <header>
+            <p className="eyebrow">Trace</p>
+            <h2>Agent steps</h2>
+          </header>
+          {traces.length === 0 ? (
+            <p className="trace-empty">No agent steps yet.</p>
+          ) : (
+            <ol className="trace-list">
+              {traces.map((trace) => {
+                const detail = formatTraceDetail(trace.detail);
+                return (
+                  <li className={`trace-item ${trace.status}`} key={trace.id}>
+                    <div>
+                      <span className="trace-dot" />
+                    </div>
+                    <article>
+                      <div className="trace-title-row">
+                        <h3>{trace.title}</h3>
+                        {trace.duration_ms ? <span>{trace.duration_ms}ms</span> : null}
+                      </div>
+                      <p>
+                        {trace.span_type}
+                        {trace.step_number !== null ? ` · step ${trace.step_number}` : ""}
+                      </p>
+                      {detail ? <pre>{detail}</pre> : null}
+                    </article>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </aside>
       </div>
 
       <form className="composer" onSubmit={submitMessage}>

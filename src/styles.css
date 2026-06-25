@@ -221,6 +221,12 @@ h2 {
   padding: 22px 28px;
 }
 
+.chat-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  min-height: 0;
+}
+
 .messages {
   display: flex;
   flex-direction: column;
@@ -269,6 +275,109 @@ h2 {
   white-space: pre-wrap;
 }
 
+.trace-panel {
+  background: #eef3f4;
+  border-left: 1px solid #d9dee5;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  overflow: hidden;
+  padding: 22px;
+}
+
+.trace-panel header {
+  margin-bottom: 16px;
+}
+
+.trace-empty {
+  color: #607086;
+  font-weight: 700;
+}
+
+.trace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  list-style: none;
+  margin: 0;
+  overflow: auto;
+  padding: 0;
+}
+
+.trace-item {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 14px minmax(0, 1fr);
+}
+
+.trace-dot {
+  background: #607086;
+  border-radius: 999px;
+  display: block;
+  height: 10px;
+  margin-top: 5px;
+  width: 10px;
+}
+
+.trace-item.running .trace-dot {
+  background: #c68522;
+}
+
+.trace-item.done .trace-dot {
+  background: #2f6f73;
+}
+
+.trace-item.error .trace-dot {
+  background: #b42318;
+}
+
+.trace-item article {
+  background: white;
+  border: 1px solid #d9dee5;
+  border-radius: 8px;
+  min-width: 0;
+  padding: 11px 12px;
+}
+
+.trace-title-row {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.trace-title-row h3 {
+  font-size: 14px;
+  line-height: 1.35;
+  margin: 0;
+}
+
+.trace-title-row span,
+.trace-item p {
+  color: #607086;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.trace-item p {
+  margin-top: 5px;
+}
+
+.trace-item pre {
+  background: #f6f7f9;
+  border: 1px solid #e4e8ee;
+  border-radius: 6px;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 10px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  padding: 9px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .composer {
   background: #f6f7f9;
   border-top: 1px solid #d9dee5;
@@ -306,8 +415,19 @@ h2 {
   .content-band,
   .chat-header,
   .messages,
+  .trace-panel,
   .composer {
     padding-left: 18px;
     padding-right: 18px;
+  }
+
+  .chat-main {
+    grid-template-columns: 1fr;
+  }
+
+  .trace-panel {
+    border-left: 0;
+    border-top: 1px solid #d9dee5;
+    max-height: 360px;
   }
 }
