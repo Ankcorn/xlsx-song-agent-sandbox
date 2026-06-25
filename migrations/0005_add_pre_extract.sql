@@ -1,0 +1,3 @@
+ALTER TABLE spreadsheets
+  ADD COLUMN pre_extract INTEGER NOT NULL DEFAULT 1;
+

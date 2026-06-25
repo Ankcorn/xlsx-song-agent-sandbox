@@ -20,6 +20,7 @@ type Spreadsheet = {
   filename: string;
   content_type: string;
   error_message?: string | null;
+  pre_extract?: number;
   size_bytes: number;
   agent_name: string;
   status?: "processing" | "ready" | "failed";
@@ -88,6 +89,10 @@ function isAgentTraceMessage(value: unknown): value is AgentTraceMessage {
     value.type === "agent_trace" &&
     "trace" in value
   );
+}
+
+function extractionLabel(spreadsheet: Spreadsheet) {
+  return spreadsheet.pre_extract === 0 ? "Just uploaded" : "Pre-extracted";
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -169,7 +174,8 @@ function SpreadsheetListPage() {
               <div>
                 <h2>{spreadsheet.filename}</h2>
                 <p>
-                  {formatBytes(spreadsheet.size_bytes)} · {spreadsheet.status ?? "ready"} · {spreadsheet.agent_name}
+                  {formatBytes(spreadsheet.size_bytes)} · {spreadsheet.status ?? "ready"} · {extractionLabel(spreadsheet)} ·{" "}
+                  {spreadsheet.agent_name}
                 </p>
                 {spreadsheet.error_message ? <p className="row-error">{spreadsheet.error_message}</p> : null}
               </div>
@@ -187,6 +193,7 @@ function UploadPage() {
   const [error, setError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [preExtract, setPreExtract] = useState(true);
   const [uploadAgentName, setUploadAgentName] = useState<string | null>(null);
   const [uploadTraces, setUploadTraces] = useState<AgentTrace[]>([]);
   useAgent({
@@ -240,13 +247,14 @@ function UploadPage() {
     const formData = new FormData();
     formData.append("spreadsheet", file);
     formData.append("spreadsheetId", spreadsheetId);
+    formData.append("preExtract", String(preExtract));
     setError(null);
     setIsUploading(true);
     setUploadAgentName(agentName);
     setUploadTraces([
       {
         created_at: new Date().toISOString(),
-        detail: JSON.stringify({ filename: file.name, sizeBytes: file.size }),
+        detail: JSON.stringify({ filename: file.name, preExtract, sizeBytes: file.size }),
         duration_ms: null,
         id: "client-upload-started",
         request_id: null,
@@ -303,6 +311,17 @@ function UploadPage() {
           />
         </label>
 
+        <label className="mode-toggle">
+          <input
+            checked={preExtract}
+            disabled={isUploading}
+            type="checkbox"
+            onChange={(event) => setPreExtract(event.target.checked)}
+          />
+          <span />
+          <strong>{preExtract ? "Pre-extract with codemode" : "Just upload"}</strong>
+        </label>
+
         {error ? <p className="error-text">{error}</p> : null}
 
         <button className="primary-button" type="submit" disabled={!file || isUploading}>
@@ -313,8 +332,8 @@ function UploadPage() {
         {(isUploading || uploadTraces.length > 0) && (
           <div className="upload-steps">
             <header>
-              <p className="eyebrow">Analysis</p>
-              <h2>Preparing spreadsheet agent</h2>
+              <p className="eyebrow">{preExtract ? "Analysis" : "Upload"}</p>
+              <h2>{preExtract ? "Preparing spreadsheet agent" : "Storing spreadsheet file"}</h2>
             </header>
             <ol className="trace-list">
               {uploadTraces.map((trace) => {
@@ -452,7 +471,7 @@ function ChatSurface({
           <p className="eyebrow">{spreadsheet.agent_name}</p>
           <h1>{spreadsheet.filename}</h1>
           <p className="muted">
-            {formatBytes(spreadsheet.size_bytes)} · {spreadsheet.content_type || "spreadsheet"}
+            {formatBytes(spreadsheet.size_bytes)} · {spreadsheet.content_type || "spreadsheet"} · {extractionLabel(spreadsheet)}
           </p>
         </div>
       </header>
@@ -462,7 +481,11 @@ function ChatSurface({
           {visibleMessages.length === 0 ? (
             <div className="empty-state">
               <FileSpreadsheet size={28} />
-              <p>This spreadsheet has its own retained agent.</p>
+              <p>
+                {spreadsheet.pre_extract === 0
+                  ? "This spreadsheet is available as a raw file in the sandbox."
+                  : "This spreadsheet has a pre-extracted SQLite database."}
+              </p>
             </div>
           ) : (
             visibleMessages.map((message) => (

@@ -24,6 +24,7 @@ type SpreadsheetRow = {
   agent_name: string;
   error_message: string | null;
   r2_key: string | null;
+  pre_extract: number;
   sandbox_path: string | null;
   status: "processing" | "ready" | "failed";
   updated_at: string;
@@ -380,7 +381,7 @@ function isSpreadsheetFile(file: File) {
 async function listSpreadsheets(env: Env) {
   const { results } = await env.DB.prepare(
     [
-      "SELECT id, filename, content_type, size_bytes, agent_name, r2_key, sandbox_path, status, error_message, uploaded_at, updated_at",
+      "SELECT id, filename, content_type, size_bytes, agent_name, r2_key, pre_extract, sandbox_path, status, error_message, uploaded_at, updated_at",
       "FROM spreadsheets",
       "ORDER BY updated_at DESC",
     ].join(" "),
@@ -398,7 +399,7 @@ async function getSpreadsheet(env: Env, id: string) {
 async function getSpreadsheetRow(env: Env, id: string) {
   const spreadsheet = await env.DB.prepare(
     [
-      "SELECT id, filename, content_type, size_bytes, agent_name, r2_key, sandbox_path, status, error_message, uploaded_at, updated_at",
+      "SELECT id, filename, content_type, size_bytes, agent_name, r2_key, pre_extract, sandbox_path, status, error_message, uploaded_at, updated_at",
       "FROM spreadsheets",
       "WHERE id = ?",
     ].join(" "),
@@ -422,6 +423,8 @@ async function uploadSpreadsheet(request: Request, env: Env) {
   }
 
   const requestedId = formData.get("spreadsheetId");
+  const requestedPreExtract = formData.get("preExtract");
+  const preExtract = requestedPreExtract !== "false";
   const id = typeof requestedId === "string" && /^[a-f0-9-]{36}$/i.test(requestedId) ? requestedId : crypto.randomUUID();
   const agentName = agentNameForSpreadsheet(id);
   const sandboxPath = `/workspace/spreadsheets/${id}/${safeFilename(file.name)}`;
@@ -433,26 +436,27 @@ async function uploadSpreadsheet(request: Request, env: Env) {
   await env.DB.prepare(
     [
       "INSERT INTO spreadsheets",
-      "(id, filename, content_type, size_bytes, agent_name, r2_key, sandbox_path, status, error_message, updated_at)",
-      "VALUES (?, ?, ?, ?, ?, ?, ?, 'processing', NULL, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+      "(id, filename, content_type, size_bytes, agent_name, r2_key, pre_extract, sandbox_path, status, error_message, updated_at)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'processing', NULL, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
       "ON CONFLICT(id) DO UPDATE SET",
       "filename = excluded.filename,",
       "content_type = excluded.content_type,",
       "size_bytes = excluded.size_bytes,",
       "agent_name = excluded.agent_name,",
       "r2_key = excluded.r2_key,",
+      "pre_extract = excluded.pre_extract,",
       "sandbox_path = excluded.sandbox_path,",
       "status = 'processing',",
       "error_message = NULL,",
       "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
     ].join(" "),
   )
-    .bind(id, file.name, file.type || "application/octet-stream", file.size, agentName, r2Key, sandboxPath)
+    .bind(id, file.name, file.type || "application/octet-stream", file.size, agentName, r2Key, preExtract ? 1 : 0, sandboxPath)
     .run();
 
   await stub.fetch("https://agent.local/upload-trace", {
     body: JSON.stringify({
-      detail: { filename: file.name, sizeBytes: file.size },
+      detail: { filename: file.name, preExtract, sizeBytes: file.size },
       spanType: "upload",
       status: "running",
       title: "Upload received",
@@ -507,22 +511,36 @@ async function uploadSpreadsheet(request: Request, env: Env) {
         sandboxPath,
         sizeBytes: file.size,
         spreadsheetId: id,
+        preExtract,
       }),
       headers: { "content-type": "application/json" },
       method: "POST",
     });
     if (!fileResponse.ok) throw new Error((await fileResponse.text()) || "Failed to persist spreadsheet file.");
 
-    const analysisResponse = await stub.fetch("https://agent.local/analyze-spreadsheet-file", {
-      body: JSON.stringify({
-        filename: file.name,
-        sandboxPath,
-        spreadsheetId: id,
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    });
-    if (!analysisResponse.ok) throw new Error((await analysisResponse.text()) || "Failed to analyze spreadsheet file.");
+    if (preExtract) {
+      const analysisResponse = await stub.fetch("https://agent.local/analyze-spreadsheet-file", {
+        body: JSON.stringify({
+          filename: file.name,
+          sandboxPath,
+          spreadsheetId: id,
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      if (!analysisResponse.ok) throw new Error((await analysisResponse.text()) || "Failed to analyze spreadsheet file.");
+    } else {
+      await stub.fetch("https://agent.local/upload-trace", {
+        body: JSON.stringify({
+          detail: "File is available in R2 and the sandbox; codemode pre-extraction was skipped.",
+          spanType: "ingestion",
+          status: "done",
+          title: "Pre-extraction skipped",
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+    }
 
     await env.DB.prepare(
       [
@@ -563,6 +581,7 @@ async function uploadSpreadsheet(request: Request, env: Env) {
         id,
         filename: file.name,
         content_type: file.type || "application/octet-stream",
+        pre_extract: preExtract ? 1 : 0,
         size_bytes: file.size,
         agent_name: agentName,
         sandbox_path: sandboxPath,
@@ -582,12 +601,20 @@ export class HackathonAgent extends Think<Env> {
   }
 
   getSystemPrompt() {
+    const spreadsheetId = spreadsheetIdFromAgentName(this.name);
+    const fileMode = spreadsheetId ? this.getSpreadsheetFileMode(spreadsheetId) : null;
+    const preExtracted = fileMode?.preExtract ?? true;
+
     return [
       "You are a practical hackathon coding assistant.",
       "You are scoped to one uploaded spreadsheet when your agent name starts with spreadsheet-.",
       "The uploaded spreadsheet is stored on disk in that spreadsheet's Cloudflare Sandbox.",
-      "The spreadsheet has also been pre-analyzed into your own Durable Object SQLite database with dynamic tables.",
-      "For questions about the data, first call describe_spreadsheet_database, then query_spreadsheet_database. Use execute_python only when SQL is insufficient or the user asks for code/Python.",
+      preExtracted
+        ? "This spreadsheet was pre-extracted into your own Durable Object SQLite database with dynamic tables."
+        : "This spreadsheet was uploaded without pre-extraction. Its raw file is available in the sandbox and R2, but the dynamic SQLite database may be empty.",
+      preExtracted
+        ? "For questions about the data, first call describe_spreadsheet_database, then query_spreadsheet_database. Use execute_python only when SQL is insufficient or the user asks for code/Python."
+        : "For questions about the data, use execute_python first to inspect the raw spreadsheet file at SPREADSHEET_PATH. Do not assume pre-extracted SQL tables exist.",
       "Use pandas.read_csv for CSV, pandas.read_csv(..., sep='\\t') for TSV, pandas.read_excel for XLSX/XLS, pandas.read_excel(..., engine='odf') for ODS, and pandas.read_xml or lxml/ElementTree for XML.",
       "When citing values, include the source_ref/source_row from the generated database where possible.",
       "Keep answers concise, concrete, and useful.",
@@ -660,6 +687,7 @@ export class HackathonAgent extends Think<Env> {
       const body = (await request.json().catch(() => ({}))) as {
         contentType?: unknown;
         filename?: unknown;
+        preExtract?: unknown;
         r2Key?: unknown;
         sandboxPath?: unknown;
         sizeBytes?: unknown;
@@ -680,6 +708,7 @@ export class HackathonAgent extends Think<Env> {
       this.storeSpreadsheetFile({
         contentType: body.contentType,
         filename: body.filename,
+        preExtract: body.preExtract !== false,
         r2Key: body.r2Key,
         sandboxPath: body.sandboxPath,
         sizeBytes: body.sizeBytes,
@@ -890,12 +919,20 @@ export class HackathonAgent extends Think<Env> {
         size_bytes INTEGER NOT NULL,
         sandbox_path TEXT NOT NULL,
         r2_key TEXT,
+        pre_extract INTEGER NOT NULL DEFAULT 1,
         file_base64 TEXT,
         updated_at TEXT NOT NULL
       )
     `;
     try {
       this.ctx.storage.sql.exec("ALTER TABLE agent_spreadsheet_files ADD COLUMN r2_key TEXT");
+    } catch (error) {
+      if (!(error instanceof Error ? error.message : String(error)).toLowerCase().includes("duplicate column")) {
+        throw error;
+      }
+    }
+    try {
+      this.ctx.storage.sql.exec("ALTER TABLE agent_spreadsheet_files ADD COLUMN pre_extract INTEGER NOT NULL DEFAULT 1");
     } catch (error) {
       if (!(error instanceof Error ? error.message : String(error)).toLowerCase().includes("duplicate column")) {
         throw error;
@@ -1110,6 +1147,7 @@ export class HackathonAgent extends Think<Env> {
   private storeSpreadsheetFile(input: {
     contentType: string;
     filename: string;
+    preExtract: boolean;
     r2Key: string;
     sandboxPath: string;
     sizeBytes: number;
@@ -1124,6 +1162,7 @@ export class HackathonAgent extends Think<Env> {
         size_bytes,
         sandbox_path,
         r2_key,
+        pre_extract,
         updated_at
       )
       VALUES (
@@ -1133,6 +1172,7 @@ export class HackathonAgent extends Think<Env> {
         ${input.sizeBytes},
         ${input.sandboxPath},
         ${input.r2Key},
+        ${input.preExtract ? 1 : 0},
         ${new Date().toISOString()}
       )
       ON CONFLICT(spreadsheet_id) DO UPDATE SET
@@ -1141,8 +1181,21 @@ export class HackathonAgent extends Think<Env> {
         size_bytes = excluded.size_bytes,
         sandbox_path = excluded.sandbox_path,
         r2_key = excluded.r2_key,
+        pre_extract = excluded.pre_extract,
         updated_at = excluded.updated_at
     `;
+  }
+
+  private getSpreadsheetFileMode(spreadsheetId: string) {
+    this.ensureFileSchema();
+    const rows = this.sql<{ pre_extract: number | null }>`
+      SELECT pre_extract
+      FROM agent_spreadsheet_files
+      WHERE spreadsheet_id = ${spreadsheetId}
+      LIMIT 1
+    `;
+    if (!rows[0]) return null;
+    return { preExtract: rows[0].pre_extract !== 0 };
   }
 
   private async restoreSpreadsheetFile(spreadsheetId: string, filename: string, sandboxPath: string, r2Key?: unknown) {

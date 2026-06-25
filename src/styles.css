@@ -219,6 +219,56 @@ h2 {
   display: none;
 }
 
+.mode-toggle {
+  align-items: center;
+  background: white;
+  border: 1px solid #dce2e9;
+  border-radius: 8px;
+  color: #263241;
+  cursor: pointer;
+  display: flex;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.mode-toggle input {
+  height: 1px;
+  opacity: 0;
+  position: absolute;
+  width: 1px;
+}
+
+.mode-toggle span {
+  background: #cbd4df;
+  border-radius: 999px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 24px;
+  position: relative;
+  transition: background 160ms ease;
+  width: 44px;
+}
+
+.mode-toggle span::after {
+  background: white;
+  border-radius: 999px;
+  content: "";
+  height: 18px;
+  left: 3px;
+  position: absolute;
+  top: 3px;
+  transition: transform 160ms ease;
+  width: 18px;
+}
+
+.mode-toggle input:checked + span {
+  background: #2f6f73;
+}
+
+.mode-toggle input:checked + span::after {
+  transform: translateX(20px);
+}
+
 .upload-steps {
   background: #eef3f4;
   border: 1px solid #d9dee5;
