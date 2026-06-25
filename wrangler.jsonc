@@ -45,6 +45,13 @@
       "max_instances": 5
     }
   ],
+  "workflows": [
+    {
+      "binding": "EXTRACTION_WORKFLOW",
+      "class_name": "ExtractionWorkflow",
+      "name": "xlsx-song-extraction-workflow"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

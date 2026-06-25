@@ -4,6 +4,7 @@ import { routeAgentRequest } from "agents";
 import { createAiGateway } from "ai-gateway-provider";
 import { createAnthropic } from "ai-gateway-provider/providers/anthropic";
 import { createOpenAI } from "ai-gateway-provider/providers/openai";
+import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { generateText, stepCountIs, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
@@ -18,6 +19,7 @@ type Env = {
   AI_GATEWAY_PROVIDER?: string;
   ASSETS: Fetcher;
   DB: D1Database;
+  EXTRACTION_WORKFLOW: Workflow;
   HackathonAgent: DurableObjectNamespace<HackathonAgent>;
   Sandbox: DurableObjectNamespace<SandboxType>;
   SPREADSHEETS: R2Bucket;
@@ -64,6 +66,16 @@ type AgentRequestPayload = {
   agentName?: unknown;
   message?: unknown;
   spreadsheetId?: unknown;
+};
+
+type ExtractionWorkflowParams = {
+  agentName: string;
+  contentType: string;
+  filename: string;
+  r2Key: string;
+  sandboxPath: string;
+  sizeBytes: number;
+  spreadsheetId: string;
 };
 
 type CodemodeExtraction = {
@@ -658,16 +670,29 @@ async function uploadSpreadsheet(request: Request, env: Env) {
     if (!fileResponse.ok) throw new Error((await fileResponse.text()) || "Failed to persist spreadsheet file.");
 
     if (preExtract) {
-      const analysisResponse = await stub.fetch("https://agent.local/analyze-spreadsheet-file", {
+      await stub.fetch("https://agent.local/upload-trace", {
         body: JSON.stringify({
-          filename: file.name,
-          sandboxPath,
-          spreadsheetId: id,
+          detail: "Codemode pre-extraction is running in a Cloudflare Workflow.",
+          spanType: "workflow",
+          status: "running",
+          title: "Extraction workflow queued",
         }),
         headers: { "content-type": "application/json" },
         method: "POST",
       });
-      if (!analysisResponse.ok) throw new Error((await analysisResponse.text()) || "Failed to analyze spreadsheet file.");
+      const spreadsheet = await getSpreadsheetRow(env, id);
+      if (!spreadsheet) throw new Error("Failed to load spreadsheet for extraction workflow.");
+      const workflowId = await startExtractionWorkflow(env, spreadsheet);
+      await stub.fetch("https://agent.local/upload-trace", {
+        body: JSON.stringify({
+          detail: { workflowId },
+          spanType: "workflow",
+          status: "done",
+          title: "Extraction workflow started",
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
     } else {
       await stub.fetch("https://agent.local/upload-trace", {
         body: JSON.stringify({
@@ -679,17 +704,17 @@ async function uploadSpreadsheet(request: Request, env: Env) {
         headers: { "content-type": "application/json" },
         method: "POST",
       });
-    }
 
-    await env.DB.prepare(
-      [
-        "UPDATE spreadsheets",
-        "SET status = 'ready', error_message = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-        "WHERE id = ?",
-      ].join(" "),
-    )
-      .bind(id)
-      .run();
+      await env.DB.prepare(
+        [
+          "UPDATE spreadsheets",
+          "SET status = 'ready', error_message = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+          "WHERE id = ?",
+        ].join(" "),
+      )
+        .bind(id)
+        .run();
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Upload failed";
     await env.DB.prepare(
@@ -779,12 +804,29 @@ async function sendAgentMessage(env: Env, agentName: string, message: string) {
   return json(data, { status: response.status });
 }
 
+async function startExtractionWorkflow(env: Env, spreadsheet: SpreadsheetRow) {
+  if (!spreadsheet.r2_key) throw new Error("Spreadsheet file is not available in R2.");
+
+  const instance = await env.EXTRACTION_WORKFLOW.create({
+    params: {
+      agentName: spreadsheet.agent_name,
+      contentType: spreadsheet.content_type || "application/octet-stream",
+      filename: spreadsheet.filename,
+      r2Key: spreadsheet.r2_key,
+      sandboxPath: spreadsheet.sandbox_path ?? `/workspace/spreadsheets/${spreadsheet.id}/${safeFilename(spreadsheet.filename)}`,
+      sizeBytes: spreadsheet.size_bytes,
+      spreadsheetId: spreadsheet.id,
+    } satisfies ExtractionWorkflowParams,
+  });
+
+  return instance.id;
+}
+
 async function retrySpreadsheetExtraction(env: Env, spreadsheetId: string) {
   const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
   if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
   if (!spreadsheet.r2_key) return json({ error: "Spreadsheet file is not available in R2." }, { status: 409 });
 
-  const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(spreadsheet.agent_name));
   await env.DB.prepare(
     [
       "UPDATE spreadsheets",
@@ -796,42 +838,7 @@ async function retrySpreadsheetExtraction(env: Env, spreadsheetId: string) {
     .run();
 
   try {
-    const fileResponse = await stub.fetch("https://agent.local/spreadsheet-file", {
-      body: JSON.stringify({
-        contentType: spreadsheet.content_type || "application/octet-stream",
-        filename: spreadsheet.filename,
-        preExtract: true,
-        r2Key: spreadsheet.r2_key,
-        sandboxPath: spreadsheet.sandbox_path,
-        sizeBytes: spreadsheet.size_bytes,
-        spreadsheetId: spreadsheet.id,
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    });
-    if (!fileResponse.ok) throw new Error((await fileResponse.text()) || "Failed to persist spreadsheet file metadata.");
-
-    const analysisResponse = await stub.fetch("https://agent.local/retry-extraction", {
-      body: JSON.stringify({
-        filename: spreadsheet.filename,
-        sandboxPath: spreadsheet.sandbox_path,
-        spreadsheetId: spreadsheet.id,
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    });
-    if (!analysisResponse.ok) throw new Error((await analysisResponse.text()) || "Failed to retry extraction.");
-
-    await env.DB.prepare(
-      [
-        "UPDATE spreadsheets",
-        "SET status = 'ready', pre_extract = 1, error_message = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-        "WHERE id = ?",
-      ].join(" "),
-    )
-      .bind(spreadsheet.id)
-      .run();
-
+    await startExtractionWorkflow(env, spreadsheet);
     const updated = await getSpreadsheetRow(env, spreadsheet.id);
     return json({ spreadsheet: updated });
   } catch (error) {
@@ -846,6 +853,90 @@ async function retrySpreadsheetExtraction(env: Env, spreadsheetId: string) {
       .bind(message, spreadsheet.id)
       .run();
     throw error;
+  }
+}
+
+export class ExtractionWorkflow extends WorkflowEntrypoint<Env, ExtractionWorkflowParams> {
+  async run(event: WorkflowEvent<ExtractionWorkflowParams>, step: WorkflowStep) {
+    const payload = event.payload;
+    const stub = this.env.HackathonAgent.get(this.env.HackathonAgent.idFromName(payload.agentName));
+
+    await step.do("mark spreadsheet processing", async () => {
+      await this.env.DB.prepare(
+        [
+          "UPDATE spreadsheets",
+          "SET status = 'processing', pre_extract = 1, error_message = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+          "WHERE id = ?",
+        ].join(" "),
+      )
+        .bind(payload.spreadsheetId)
+        .run();
+    });
+
+    try {
+      await step.do("store agent file reference", async () => {
+        const response = await stub.fetch("https://agent.local/spreadsheet-file", {
+          body: JSON.stringify({
+            contentType: payload.contentType,
+            filename: payload.filename,
+            preExtract: true,
+            r2Key: payload.r2Key,
+            sandboxPath: payload.sandboxPath,
+            sizeBytes: payload.sizeBytes,
+            spreadsheetId: payload.spreadsheetId,
+          }),
+          headers: { "content-type": "application/json" },
+          method: "POST",
+        });
+        if (!response.ok) throw new Error((await response.text()) || "Failed to persist spreadsheet file metadata.");
+      });
+
+      const analysis = await step.do(
+        "run codemode extraction",
+        { retries: { backoff: "exponential", delay: "10 seconds", limit: 2 } },
+        async () => {
+          const response = await stub.fetch("https://agent.local/retry-extraction", {
+            body: JSON.stringify({
+              filename: payload.filename,
+              sandboxPath: payload.sandboxPath,
+              spreadsheetId: payload.spreadsheetId,
+            }),
+            headers: { "content-type": "application/json" },
+            method: "POST",
+          });
+          if (!response.ok) throw new Error((await response.text()) || "Failed to analyze spreadsheet file.");
+          return response.json() as Promise<Record<string, string | number>>;
+        },
+      );
+
+      await step.do("mark spreadsheet ready", async () => {
+        await this.env.DB.prepare(
+          [
+            "UPDATE spreadsheets",
+            "SET status = 'ready', pre_extract = 1, error_message = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            "WHERE id = ?",
+          ].join(" "),
+        )
+          .bind(payload.spreadsheetId)
+          .run();
+      });
+
+      return analysis;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Extraction workflow failed";
+      await step.do("mark spreadsheet failed", async () => {
+        await this.env.DB.prepare(
+          [
+            "UPDATE spreadsheets",
+            "SET status = 'failed', error_message = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            "WHERE id = ?",
+          ].join(" "),
+        )
+          .bind(message, payload.spreadsheetId)
+          .run();
+      });
+      throw error;
+    }
   }
 }
 
