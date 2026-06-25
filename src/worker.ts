@@ -102,6 +102,7 @@ const DEFAULT_SCRIPT = [
 ].join("\n");
 
 const CODEMODE_INSPECTION_SCRIPT = String.raw`
+import csv
 import json
 import os
 import xml.etree.ElementTree as ET
@@ -132,6 +133,46 @@ def clean_matrix(rows, limit=20):
         cleaned.append([clean(value) for value in list(row)])
     return cleaned
 
+def sniff_delimiter(path, fallback):
+    with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+        sample = handle.read(65536)
+    if not sample.strip():
+        return fallback
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=[",", "\t", ";", "|"]).delimiter
+    except Exception:
+        return fallback
+
+def inspect_delimited(path, suffix):
+    import pandas as pd
+    sep = "\t" if suffix == ".tsv" else sniff_delimiter(path, ",")
+    try:
+        return (
+            pd.read_csv(
+                path,
+                sep=sep,
+                header=None,
+                nrows=20,
+                dtype=object,
+                engine="python",
+                on_bad_lines="skip",
+                encoding="utf-8-sig",
+            ).where(lambda frame: frame.notna(), None),
+            sep,
+            "pandas-python",
+        )
+    except Exception as pandas_error:
+        rows = []
+        with open(path, newline="", encoding="utf-8-sig", errors="replace") as handle:
+            reader = csv.reader(handle, delimiter=sep)
+            for row_index, row in enumerate(reader):
+                if row_index >= 20:
+                    break
+                rows.append(row)
+        max_columns = max([len(row) for row in rows], default=0)
+        normalized = [row + [None] * (max_columns - len(row)) for row in rows]
+        return pd.DataFrame(normalized, dtype=object), sep, f"csv-reader fallback after {type(pandas_error).__name__}"
+
 profile = {
     "filename": path.name,
     "extension": suffix,
@@ -140,13 +181,13 @@ profile = {
 }
 
 if suffix in [".csv", ".tsv"]:
-    import pandas as pd
-    sep = "\t" if suffix == ".tsv" else ","
-    sample = pd.read_csv(path, sep=sep, header=None, nrows=20, dtype=object).where(lambda frame: frame.notna(), None)
+    sample, delimiter, parser = inspect_delimited(path, suffix)
     profile["sheets"].append({
         "name": path.stem,
         "rows_seen": int(len(sample.index)),
         "columns_seen": int(len(sample.columns)),
+        "delimiter": delimiter,
+        "parser": parser,
         "sample": clean_matrix(sample.values.tolist()),
     })
 elif suffix in [".xlsx", ".xls", ".ods"]:
@@ -1060,7 +1101,7 @@ export class HackathonAgent extends Think<Env> {
       preExtracted
         ? "For questions about the data, first call describe_spreadsheet_database, then query_spreadsheet_database. Use execute_python only when SQL is insufficient or the user asks for code/Python."
         : "For questions about the data, use execute_python first to inspect the raw spreadsheet file at SPREADSHEET_PATH. Do not assume pre-extracted SQL tables exist.",
-      "Use pandas.read_csv for CSV, pandas.read_csv(..., sep='\\t') for TSV, pandas.read_excel for XLSX/XLS, pandas.read_excel(..., engine='odf') for ODS, and pandas.read_xml or lxml/ElementTree for XML.",
+      "Use robust CSV/TSV parsing: sniff delimiters, prefer pandas.read_csv(..., engine='python', on_bad_lines='skip', encoding='utf-8-sig') when using pandas, and fall back to csv.reader for ragged files. Use pandas.read_excel for XLSX/XLS, pandas.read_excel(..., engine='odf') for ODS, and pandas.read_xml or lxml/ElementTree for XML.",
       "When citing values, include the source_ref/source_row from the generated database where possible.",
       "Keep answers concise, concrete, and useful.",
     ].join("\n");
@@ -1654,7 +1695,10 @@ export class HackathonAgent extends Think<Env> {
       "Rules:",
       "- Preserve all meaningful spreadsheet/XML/CSV data.",
       "- Include source_row and source_ref for every extracted row so answers can point back to the original document.",
-      "- Use pandas for csv/tsv/xlsx/xls/ods when useful. Use ElementTree or lxml for XML.",
+      "- Use pandas for xlsx/xls/ods when useful. Use ElementTree or lxml for XML.",
+      "- For CSV/TSV, expect messy real-world files: metadata rows, inconsistent column counts, BOMs, quoted delimiters, blank lines, and semicolon/pipe/tab/comma delimiters.",
+      "- For CSV/TSV, sniff the delimiter with csv.Sniffer over a large sample when possible. If using pandas.read_csv, prefer engine='python', dtype=object, keep_default_na=False, encoding='utf-8-sig', and on_bad_lines='skip'.",
+      "- If pandas.read_csv raises ParserError or UnicodeDecodeError, fall back to Python csv.reader with encoding='utf-8-sig', errors='replace', preserving row numbers and padding ragged rows instead of failing.",
       "- Normalize NaN, Infinity, pandas.NA, timestamps, decimals, and numpy values into valid JSON values.",
       "- Print with json.dumps(..., ensure_ascii=False, allow_nan=False).",
       "- Never print Python dict reprs, comments, logs, warnings, or NaN tokens.",
