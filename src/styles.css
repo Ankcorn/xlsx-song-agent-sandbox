@@ -1,4 +1,21 @@
 :root {
+  --background: #f6f7f9;
+  --foreground: #17202a;
+  --card: #ffffff;
+  --card-foreground: #263241;
+  --muted: #607086;
+  --muted-foreground: #526176;
+  --border: #dce2e9;
+  --input: #cbd4df;
+  --primary: #2f6f73;
+  --primary-foreground: #ffffff;
+  --secondary: #ffffff;
+  --secondary-foreground: #12343b;
+  --destructive: #b42318;
+  --destructive-foreground: #ffffff;
+  --ring: #2f6f73;
+  --warning: #c68522;
+  --radius: 8px;
   color: #17202a;
   background: #f6f7f9;
   font-family:
@@ -43,6 +60,266 @@ h1 {
 
 h2 {
   font-size: 16px;
+}
+
+.ui-button {
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  display: inline-flex;
+  font-weight: 800;
+  gap: 8px;
+  justify-content: center;
+  line-height: 1;
+  min-width: 0;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    opacity 160ms ease;
+  white-space: nowrap;
+}
+
+.ui-button-md {
+  min-height: 42px;
+  padding: 0 16px;
+}
+
+.ui-button-sm {
+  min-height: 38px;
+  padding: 0 12px;
+}
+
+.ui-button-square {
+  aspect-ratio: 1;
+  padding: 0;
+}
+
+.ui-button-primary {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.ui-button-secondary {
+  background: var(--secondary);
+  border-color: var(--input);
+  color: var(--secondary-foreground);
+}
+
+.ui-button-secondary-destructive {
+  background: var(--secondary);
+  border-color: #f0c7c2;
+  color: var(--destructive);
+}
+
+.ui-button:hover:not(:disabled) {
+  border-color: var(--ring);
+}
+
+.ui-button-primary:hover:not(:disabled) {
+  background: #255f62;
+}
+
+.ui-button-secondary-destructive:hover:not(:disabled) {
+  background: #fff7f5;
+  border-color: #d92d20;
+}
+
+.ui-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.ui-spinner {
+  animation: spin 0.9s linear infinite;
+  flex: 0 0 auto;
+}
+
+.ui-spinner-sm {
+  height: 18px;
+  width: 18px;
+}
+
+.ui-spinner-md {
+  height: 22px;
+  width: 22px;
+}
+
+.ui-badge {
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 6px;
+  line-height: 1;
+  min-height: 24px;
+  padding: 0 9px;
+}
+
+.ui-badge-indicator {
+  border-radius: 999px;
+  height: 7px;
+  width: 7px;
+}
+
+.ui-badge-success {
+  background: #ecfdf3;
+  border-color: #abefc6;
+  color: #067647;
+}
+
+.ui-badge-success .ui-badge-indicator {
+  background: #17b26a;
+}
+
+.ui-badge-error {
+  background: #fef3f2;
+  border-color: #fecdca;
+  color: #b42318;
+}
+
+.ui-badge-error .ui-badge-indicator {
+  background: #d92d20;
+}
+
+.ui-badge-warning {
+  background: #fffaeb;
+  border-color: #fedf89;
+  color: #b54708;
+}
+
+.ui-badge-warning .ui-badge-indicator {
+  background: #f79009;
+}
+
+.ui-badge-neutral {
+  background: #f2f4f7;
+  border-color: #e4e7ec;
+  color: #475467;
+}
+
+.ui-badge-neutral .ui-badge-indicator {
+  background: #667085;
+}
+
+.ui-badge-teal-subtle {
+  background: #edf7f5;
+  border-color: #b8d8d4;
+  color: #12343b;
+}
+
+.ui-banner {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--card-foreground);
+  display: grid;
+  gap: 5px;
+  padding: 14px 16px;
+}
+
+.ui-banner strong {
+  font-size: 14px;
+}
+
+.ui-banner p {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.ui-banner-error {
+  background: #fff7f5;
+  border-color: #f0c7c2;
+  color: var(--destructive);
+}
+
+.ui-banner-error p {
+  color: #912018;
+}
+
+.ui-empty {
+  align-items: center;
+  color: var(--muted-foreground);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  justify-content: center;
+  text-align: center;
+}
+
+.ui-empty-sm {
+  gap: 10px;
+}
+
+.ui-empty h2 {
+  color: var(--foreground);
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.ui-empty p {
+  color: var(--muted);
+  line-height: 1.45;
+  margin-top: 4px;
+}
+
+.ui-empty-icon {
+  color: var(--muted-foreground);
+  display: inline-flex;
+}
+
+.ui-input {
+  background: var(--card);
+  border: 1px solid var(--input);
+  border-radius: var(--radius);
+  color: var(--foreground);
+  min-height: 42px;
+  min-width: 0;
+  padding: 0 14px;
+}
+
+.ui-input:focus {
+  border-color: var(--ring);
+  outline: 2px solid rgb(47 111 115 / 18%);
+}
+
+.ui-tabs {
+  align-items: center;
+  background: #eef3f4;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+}
+
+.ui-tab {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: #334155;
+  cursor: pointer;
+  display: inline-flex;
+  font-weight: 800;
+  gap: 8px;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+}
+
+.ui-tab.active {
+  background: #12343b;
+  color: white;
+}
+
+.ui-table {
+  border-collapse: collapse;
+  width: 100%;
 }
 
 .page-shell {

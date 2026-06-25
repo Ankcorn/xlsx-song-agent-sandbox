@@ -1,6 +1,6 @@
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
-import { Badge, Banner, Button, Empty, Input, Loader, Table, Tabs } from "@cloudflare/kumo";
+import { Badge, Banner, Button, Empty, Input, Loader, Table, Tabs } from "./components/ui";
 import {
   Link,
   Outlet,
@@ -32,7 +32,6 @@ import {
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import "@cloudflare/kumo/styles/standalone";
 import "./styles.css";
 
 type Spreadsheet = {
