@@ -438,8 +438,17 @@
     @apply grid-cols-[minmax(0,1fr)_56px];
   }
 
+  .chat-main.inspect-mode,
+  .chat-main.inspect-mode.trace-collapsed {
+    @apply grid-cols-1 gap-0 p-6;
+  }
+
   .chat-workspace {
     @apply grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto] overflow-hidden;
+  }
+
+  .chat-main.inspect-mode .chat-workspace {
+    @apply grid-rows-1;
   }
 
   .messages {
@@ -635,6 +644,10 @@
 
   .data-viewer {
     @apply grid min-h-0 min-w-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-5 overflow-auto p-8;
+  }
+
+  .inspect-mode .data-viewer {
+    @apply p-2;
   }
 
   .viewer-header h2,

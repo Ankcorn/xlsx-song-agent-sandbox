@@ -1283,6 +1283,8 @@ function ChatSurface({
     });
   }
 
+  const showChatChrome = activeView === "chat";
+
   return (
     <section className="chat-page">
       <header className="chat-header">
@@ -1339,7 +1341,7 @@ function ChatSurface({
         </div>
       </header>
 
-      <div className={`chat-main ${isTraceCollapsed ? "trace-collapsed" : ""}`}>
+      <div className={`chat-main ${showChatChrome ? "" : "inspect-mode"} ${isTraceCollapsed ? "trace-collapsed" : ""}`}>
         <div className="chat-workspace">
           {activeView === "chat" ? (
             <div className="messages">
@@ -1388,90 +1390,94 @@ function ChatSurface({
             />
           )}
 
-          <form className="composer" onSubmit={submitMessage}>
-            <Input
-              aria-label="Message"
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              placeholder="Ask this spreadsheet agent..."
-            />
-            <Button
-              aria-label="Send message"
-              className="icon-button"
-              loading={isBusy}
-              shape="square"
-              type="submit"
-              variant="primary"
-              disabled={isBusy || !input.trim()}
-            >
-              <Send size={18} />
-            </Button>
-          </form>
+          {showChatChrome ? (
+            <form className="composer" onSubmit={submitMessage}>
+              <Input
+                aria-label="Message"
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                placeholder="Ask this spreadsheet agent..."
+              />
+              <Button
+                aria-label="Send message"
+                className="icon-button"
+                loading={isBusy}
+                shape="square"
+                type="submit"
+                variant="primary"
+                disabled={isBusy || !input.trim()}
+              >
+                <Send size={18} />
+              </Button>
+            </form>
+          ) : null}
         </div>
 
-        <aside className={`trace-panel ${isTraceCollapsed ? "is-collapsed" : ""}`}>
-          <header>
-            <div className="trace-heading">
-              <p className="eyebrow">Trace</p>
-              <h2>Agent steps</h2>
-            </div>
-            <div className="trace-actions">
-              <Button
-                aria-label="Download extraction trace"
-                className="trace-toggle"
-                shape="square"
-                size="sm"
-                onClick={() => void downloadExtractionTrace()}
-                title="Download extraction trace"
-                type="button"
-                variant="secondary"
-              >
-                <Download size={18} />
-              </Button>
-              <Button
-                aria-label={isTraceCollapsed ? "Expand trace panel" : "Collapse trace panel"}
-                className="trace-toggle"
-                shape="square"
-                size="sm"
-                onClick={() => setIsTraceCollapsed((value) => !value)}
-                title={isTraceCollapsed ? "Expand trace panel" : "Collapse trace panel"}
-                type="button"
-                variant="secondary"
-              >
-                {isTraceCollapsed ? <PanelRightOpen size={18} /> : <PanelRightClose size={18} />}
-              </Button>
-            </div>
-          </header>
-          <div className="trace-content" hidden={isTraceCollapsed}>
-            {traces.length === 0 ? (
-              <p className="trace-empty">No agent steps yet.</p>
-            ) : (
-              <ol className="trace-list">
-                {traces.map((trace) => {
-                  const detail = formatTraceDetail(trace.detail);
-                  return (
-                    <li className={`trace-item ${trace.status}`} key={trace.id}>
-                      <div>
-                        <span className="trace-dot" />
-                      </div>
-                      <article>
-                        <div className="trace-title-row">
-                          <h3>{trace.title}</h3>
-                          {trace.duration_ms ? <span>{trace.duration_ms}ms</span> : null}
+        {showChatChrome ? (
+          <aside className={`trace-panel ${isTraceCollapsed ? "is-collapsed" : ""}`}>
+            <header>
+              <div className="trace-heading">
+                <p className="eyebrow">Trace</p>
+                <h2>Agent steps</h2>
+              </div>
+              <div className="trace-actions">
+                <Button
+                  aria-label="Download extraction trace"
+                  className="trace-toggle"
+                  shape="square"
+                  size="sm"
+                  onClick={() => void downloadExtractionTrace()}
+                  title="Download extraction trace"
+                  type="button"
+                  variant="secondary"
+                >
+                  <Download size={18} />
+                </Button>
+                <Button
+                  aria-label={isTraceCollapsed ? "Expand trace panel" : "Collapse trace panel"}
+                  className="trace-toggle"
+                  shape="square"
+                  size="sm"
+                  onClick={() => setIsTraceCollapsed((value) => !value)}
+                  title={isTraceCollapsed ? "Expand trace panel" : "Collapse trace panel"}
+                  type="button"
+                  variant="secondary"
+                >
+                  {isTraceCollapsed ? <PanelRightOpen size={18} /> : <PanelRightClose size={18} />}
+                </Button>
+              </div>
+            </header>
+            <div className="trace-content" hidden={isTraceCollapsed}>
+              {traces.length === 0 ? (
+                <p className="trace-empty">No agent steps yet.</p>
+              ) : (
+                <ol className="trace-list">
+                  {traces.map((trace) => {
+                    const detail = formatTraceDetail(trace.detail);
+                    return (
+                      <li className={`trace-item ${trace.status}`} key={trace.id}>
+                        <div>
+                          <span className="trace-dot" />
                         </div>
-                        <p>
-                          {trace.span_type}
-                          {trace.step_number !== null ? ` · step ${trace.step_number}` : ""}
-                        </p>
-                        {detail ? <pre>{detail}</pre> : null}
-                      </article>
-                    </li>
-                  );
-                })}
-              </ol>
-            )}
-          </div>
-        </aside>
+                        <article>
+                          <div className="trace-title-row">
+                            <h3>{trace.title}</h3>
+                            {trace.duration_ms ? <span>{trace.duration_ms}ms</span> : null}
+                          </div>
+                          <p>
+                            {trace.span_type}
+                            {trace.step_number !== null ? ` · step ${trace.step_number}` : ""}
+                          </p>
+                          {detail ? <pre>{detail}</pre> : null}
+                        </article>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+            </div>
+          </aside>
+        ) : null}
       </div>
     </section>
   );
