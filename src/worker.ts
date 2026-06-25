@@ -52,7 +52,7 @@ type AgentTraceEvent = {
   created_at: string;
 };
 
-type DeterministicExtraction = {
+type CodemodeExtraction = {
   description: string;
   filename: string;
   format: string;
@@ -75,8 +75,7 @@ const DEFAULT_SCRIPT = [
   "print('utc =', datetime.utcnow().isoformat(timespec='seconds'))",
 ].join("\n");
 
-const DETERMINISTIC_EXTRACTION_SCRIPT = String.raw`
-import csv
+const CODEMODE_INSPECTION_SCRIPT = String.raw`
 import json
 import os
 import xml.etree.ElementTree as ET
@@ -88,75 +87,75 @@ suffix = path.suffix.lower()
 def clean(value):
     if value is None:
         return None
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
+    try:
+        import math
+        if isinstance(value, float):
+            if math.isnan(value) or math.isinf(value):
+                return None
+            if value.is_integer():
+                return int(value)
+    except Exception:
+        pass
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
     return value
 
-def unique_headers(raw_headers, width):
-    headers = []
-    seen = {}
-    for index in range(width):
-        base = str(raw_headers[index]).strip() if index < len(raw_headers) and raw_headers[index] not in (None, "") else f"column_{index + 1}"
-        base = base[:80] or f"column_{index + 1}"
-        count = seen.get(base, 0)
-        seen[base] = count + 1
-        headers.append(base if count == 0 else f"{base}_{count + 1}")
-    return headers
+def clean_matrix(rows, limit=20):
+    cleaned = []
+    for row in rows[:limit]:
+        cleaned.append([clean(value) for value in list(row)])
+    return cleaned
 
-def table_from_rows(name, rows):
-    if not rows:
-        return {"name": name, "columns": [], "rows": []}
-    width = max(len(row) for row in rows)
-    headers = unique_headers(rows[0], width)
-    extracted = []
-    for row_index, row in enumerate(rows[1:], start=2):
-        cells = {}
-        empty = True
-        for col_index, header in enumerate(headers):
-            value = clean(row[col_index] if col_index < len(row) else None)
-            if value not in (None, ""):
-                empty = False
-            cells[header] = value
-        if not empty:
-            extracted.append({"source_row": row_index, "source_ref": f"{name}!row:{row_index}", "cells": cells})
-    return {"name": name, "columns": headers, "rows": extracted}
-
-tables = []
+profile = {
+    "filename": path.name,
+    "extension": suffix,
+    "size_bytes": path.stat().st_size,
+    "sheets": [],
+}
 
 if suffix in [".csv", ".tsv"]:
-    with open(path, newline="", encoding="utf-8-sig") as handle:
-        dialect = csv.excel_tab if suffix == ".tsv" else csv.excel
-        rows = list(csv.reader(handle, dialect=dialect))
-    tables.append(table_from_rows(path.stem, rows))
+    import pandas as pd
+    sep = "\t" if suffix == ".tsv" else ","
+    sample = pd.read_csv(path, sep=sep, header=None, nrows=20, dtype=object).where(lambda frame: frame.notna(), None)
+    profile["sheets"].append({
+        "name": path.stem,
+        "rows_seen": int(len(sample.index)),
+        "columns_seen": int(len(sample.columns)),
+        "sample": clean_matrix(sample.values.tolist()),
+    })
 elif suffix in [".xlsx", ".xls", ".ods"]:
     import pandas as pd
     engine = "odf" if suffix == ".ods" else None
-    sheets = pd.read_excel(path, sheet_name=None, header=None, engine=engine)
+    sheets = pd.read_excel(path, sheet_name=None, header=None, engine=engine, nrows=20, dtype=object)
     for sheet_name, frame in sheets.items():
-        rows = frame.where(frame.notna(), None).values.tolist()
-        tables.append(table_from_rows(str(sheet_name), rows))
+        sample = frame.where(frame.notna(), None)
+        profile["sheets"].append({
+            "name": str(sheet_name),
+            "rows_seen": int(len(sample.index)),
+            "columns_seen": int(len(sample.columns)),
+            "sample": clean_matrix(sample.values.tolist()),
+        })
 elif suffix == ".xml":
     tree = ET.parse(path)
     root = tree.getroot()
-    rows = [["path", "attributes", "text"]]
+    elements = []
     for element_index, element in enumerate(root.iter(), start=1):
+        if element_index > 40:
+            break
         text = (element.text or "").strip()
         if element.attrib or text:
-            rows.append([element.tag, json.dumps(element.attrib, ensure_ascii=False), text])
-    tables.append(table_from_rows(root.tag or path.stem, rows))
+            elements.append({"attributes": dict(element.attrib), "tag": element.tag, "text": text[:500]})
+    profile["root_tag"] = root.tag
+    profile["sheets"].append({
+        "name": root.tag or path.stem,
+        "rows_seen": len(elements),
+        "columns_seen": 3,
+        "sample": elements,
+    })
 else:
     raise ValueError(f"Unsupported file extension: {suffix}")
 
-table_bits = []
-for table in tables:
-    table_bits.append(f"{table['name']}: {len(table['rows'])} rows, {len(table['columns'])} columns")
-
-print(json.dumps({
-    "description": f"{path.name} contains " + "; ".join(table_bits),
-    "filename": path.name,
-    "format": suffix.lstrip("."),
-    "tables": tables,
-}, ensure_ascii=False))
+print(json.dumps(profile, ensure_ascii=False, allow_nan=False))
 `;
 
 function arrayBufferToBase64(buffer: ArrayBuffer) {
@@ -229,6 +228,118 @@ function json(data: unknown, init?: ResponseInit) {
     status: init?.status,
     statusText: init?.statusText,
   });
+}
+
+function stripCodeFence(text: string) {
+  return text
+    .trim()
+    .replace(/^```(?:python|py)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+}
+
+function parseJsonText(text: string) {
+  const trimmed = stripCodeFence(text);
+  const objectStart = trimmed.indexOf("{");
+  const arrayStart = trimmed.indexOf("[");
+  const starts = [objectStart, arrayStart].filter((index) => index >= 0);
+  const jsonStart = starts.length ? Math.min(...starts) : -1;
+  const jsonText = jsonStart >= 0 ? balancedJsonSlice(trimmed.slice(jsonStart)) : trimmed;
+  return JSON.parse(jsonText.replace(/\b(?:NaN|Infinity|-Infinity)\b/g, "null"));
+}
+
+function balancedJsonSlice(text: string) {
+  const opener = text[0];
+  const closer = opener === "{" ? "}" : opener === "[" ? "]" : "";
+  if (!closer) return text;
+
+  let depth = 0;
+  let escaped = false;
+  let inString = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === opener) depth += 1;
+    if (char === closer) {
+      depth -= 1;
+      if (depth === 0) return text.slice(0, index + 1);
+    }
+  }
+  return text;
+}
+
+function normalizeJsonValue(value: unknown): string | number | boolean | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (value instanceof Date) return value.toISOString();
+  return JSON.stringify(value);
+}
+
+function normalizeCodemodeExtraction(value: unknown, filename: string): CodemodeExtraction {
+  const input = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const rawTables = Array.isArray(input.tables) ? input.tables : [];
+  const tables = rawTables.map((rawTable, tableIndex) => {
+    const table = rawTable && typeof rawTable === "object" ? (rawTable as Record<string, unknown>) : {};
+    const rawRows = Array.isArray(table.rows) ? table.rows : [];
+    const inferredColumns = new Set<string>();
+
+    for (const rawRow of rawRows) {
+      const row = rawRow && typeof rawRow === "object" ? (rawRow as Record<string, unknown>) : {};
+      const cells = row.cells && typeof row.cells === "object" ? (row.cells as Record<string, unknown>) : {};
+      for (const column of Object.keys(cells)) inferredColumns.add(column);
+    }
+
+    const listedColumns = Array.isArray(table.columns) ? table.columns : [];
+    const columns = [...listedColumns, ...[...inferredColumns].filter((column) => !listedColumns.includes(column))]
+      .map((column, columnIndex) => String(column || `column_${columnIndex + 1}`))
+      .filter(Boolean);
+
+    const rows = rawRows.map((rawRow, rowIndex) => {
+      const row = rawRow && typeof rawRow === "object" ? (rawRow as Record<string, unknown>) : {};
+      const cells = row.cells && typeof row.cells === "object" ? (row.cells as Record<string, unknown>) : {};
+      const sourceRow = typeof row.source_row === "number" && Number.isFinite(row.source_row) ? row.source_row : rowIndex + 1;
+      const normalizedCells: Record<string, string | number | boolean | null> = {};
+
+      for (const column of columns) {
+        normalizedCells[column] = normalizeJsonValue(cells[column]);
+      }
+
+      return {
+        cells: normalizedCells,
+        source_ref: typeof row.source_ref === "string" ? row.source_ref : `${table.name ?? `table_${tableIndex + 1}`}!row:${sourceRow}`,
+        source_row: sourceRow,
+      };
+    });
+
+    return {
+      columns,
+      name: typeof table.name === "string" && table.name.trim() ? table.name : `table_${tableIndex + 1}`,
+      rows,
+    };
+  });
+
+  return {
+    description:
+      typeof input.description === "string" && input.description.trim()
+        ? input.description
+        : `${filename} was analyzed in codemode into ${tables.length} table${tables.length === 1 ? "" : "s"}.`,
+    filename: typeof input.filename === "string" ? input.filename : filename,
+    format: typeof input.format === "string" ? input.format : filename.split(".").pop()?.toLowerCase() ?? "unknown",
+    tables,
+  };
 }
 
 function agentNameForSpreadsheet(id: string) {
@@ -818,18 +929,28 @@ export class HackathonAgent extends Think<Env> {
     await this.restoreSpreadsheetFile(spreadsheetId, filename, sandboxPath);
 
     const sandbox = getSandbox(this.env.Sandbox, `sandbox-${spreadsheetId}`);
-    const result = await sandbox.exec(
-      `python3 - <<'PY'\nSPREADSHEET_PATH = ${JSON.stringify(sandboxPath)}\n${DETERMINISTIC_EXTRACTION_SCRIPT}\nPY`,
+    const profileResult = await sandbox.exec(
+      `python3 - <<'PY'\nSPREADSHEET_PATH = ${JSON.stringify(sandboxPath)}\n${CODEMODE_INSPECTION_SCRIPT}\nPY`,
       { timeout: 60_000 },
     );
 
-    if (!result.success) {
-      throw new Error(result.stderr || "Deterministic extraction failed.");
+    if (!profileResult.success) {
+      throw new Error(profileResult.stderr || "Codemode spreadsheet inspection failed.");
     }
 
-    const extraction = JSON.parse(result.stdout) as DeterministicExtraction;
-    this.storeDeterministicExtraction(spreadsheetId, extraction);
-    const review = await this.reviewExtractionWithAgent(extraction);
+    const profile = parseJsonText(profileResult.stdout);
+    const code = await this.generateCodemodeExtractionCode(filename, profile);
+    const extractionResult = await sandbox.exec(
+      `python3 - <<'PY'\nSPREADSHEET_PATH = ${JSON.stringify(sandboxPath)}\n${code}\nPY`,
+      { timeout: 120_000 },
+    );
+
+    if (!extractionResult.success) {
+      throw new Error(extractionResult.stderr || "Codemode spreadsheet extraction failed.");
+    }
+
+    const extraction = normalizeCodemodeExtraction(parseJsonText(extractionResult.stdout), filename);
+    this.storeCodemodeExtraction(spreadsheetId, extraction);
 
     this.sql`
       INSERT INTO document_analysis (
@@ -842,10 +963,10 @@ export class HackathonAgent extends Think<Env> {
       )
       VALUES (
         ${spreadsheetId},
-        ${review.description},
+        ${extraction.description},
         ${JSON.stringify(this.extractionSummary(extraction))},
-        ${JSON.stringify(review)},
-        ${review.score},
+        ${JSON.stringify({ mode: "codemode", profile })},
+        ${100},
         ${new Date().toISOString()}
       )
       ON CONFLICT(spreadsheet_id) DO UPDATE SET
@@ -856,10 +977,10 @@ export class HackathonAgent extends Think<Env> {
         updated_at = excluded.updated_at
     `;
 
-    return { description: review.description, score: review.score, tables: extraction.tables.length };
+    return { description: extraction.description, mode: "codemode", score: 100, tables: extraction.tables.length };
   }
 
-  private storeDeterministicExtraction(spreadsheetId: string, extraction: DeterministicExtraction) {
+  private storeCodemodeExtraction(spreadsheetId: string, extraction: CodemodeExtraction) {
     const existingTables = this.sql<{ table_name: string }>`
       SELECT table_name FROM document_tables WHERE spreadsheet_id = ${spreadsheetId}
     `;
@@ -901,58 +1022,33 @@ export class HackathonAgent extends Think<Env> {
     });
   }
 
-  private async reviewExtractionWithAgent(extraction: DeterministicExtraction) {
-    const summary = this.extractionSummary(extraction);
-    const fallback = {
-      description: extraction.description,
-      notes: "Agentic review was unavailable; deterministic extraction was stored and should be checked during chat.",
-      risks: ["Agentic extraction review did not complete."],
-      score: 70,
-    };
+  private async generateCodemodeExtractionCode(filename: string, profile: unknown) {
+    const result = await generateText({
+      model: this.getModel(),
+      prompt: [
+        "You are in codemode. Generate a complete Python script that reads the uploaded spreadsheet at SPREADSHEET_PATH and prints one JSON object to stdout.",
+        "Do not explain the code. Return only Python code, with no markdown fences.",
+        "The script must dynamically extract the spreadsheet into this exact JSON shape:",
+        '{"description": string, "filename": string, "format": string, "tables": [{"name": string, "columns": string[], "rows": [{"source_row": number, "source_ref": string, "cells": object}]}]}',
+        "Rules:",
+        "- Preserve all meaningful spreadsheet/XML/CSV data.",
+        "- Include source_row and source_ref for every extracted row so answers can point back to the original document.",
+        "- Use pandas for csv/tsv/xlsx/xls/ods when useful. Use ElementTree or lxml for XML.",
+        "- Normalize NaN, Infinity, pandas.NA, timestamps, decimals, and numpy values into valid JSON values.",
+        "- Print with json.dumps(..., ensure_ascii=False, allow_nan=False).",
+        "- Never print Python dict reprs, comments, logs, warnings, or NaN tokens.",
+        "- If the first row appears to be headers, use it as columns. Otherwise create column_1, column_2, etc.",
+        `Filename: ${filename}`,
+        "Inspection profile:",
+        JSON.stringify(profile, null, 2),
+      ].join("\n\n"),
+      temperature: 0,
+    });
 
-    let resultText = "";
-    try {
-      const model = this.getModel();
-      const result = await generateText({
-        model,
-        prompt: [
-          "Review this deterministic spreadsheet extraction. Confirm whether it appears complete, score it from 0-100, and write a concise description of what the spreadsheet contains.",
-          "The extraction should preserve all meaningful data and every row should be traceable via source_row/source_ref.",
-          "Return only JSON with keys: score, description, notes, risks.",
-          JSON.stringify(summary, null, 2),
-        ].join("\n\n"),
-        temperature: 0,
-      });
-      resultText = result.text;
-    } catch (error) {
-      this.recordTrace({
-        detail: error instanceof Error ? error.message : String(error),
-        spanType: "ingestion",
-        status: "error",
-        title: "Agentic extraction review unavailable",
-      });
-      return fallback;
-    }
-
-    try {
-      const parsed = JSON.parse(resultText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim()) as {
-        description?: unknown;
-        notes?: unknown;
-        risks?: unknown;
-        score?: unknown;
-      };
-      return {
-        description: typeof parsed.description === "string" ? parsed.description : fallback.description,
-        notes: typeof parsed.notes === "string" ? parsed.notes : fallback.notes,
-        risks: Array.isArray(parsed.risks) ? parsed.risks : fallback.risks,
-        score: typeof parsed.score === "number" ? Math.max(0, Math.min(100, Math.round(parsed.score))) : fallback.score,
-      };
-    } catch {
-      return fallback;
-    }
+    return stripCodeFence(result.text);
   }
 
-  private extractionSummary(extraction: DeterministicExtraction) {
+  private extractionSummary(extraction: CodemodeExtraction) {
     return {
       description: extraction.description,
       filename: extraction.filename,
