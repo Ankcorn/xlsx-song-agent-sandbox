@@ -23,6 +23,12 @@
       "migrations_dir": "migrations"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "SPREADSHEETS",
+      "bucket_name": "xlsx-song-spreadsheets"
+    }
+  ],
   "containers": [
     {
       "class_name": "Sandbox",

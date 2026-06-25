@@ -13,6 +13,7 @@ type Env = {
   DB: D1Database;
   HackathonAgent: DurableObjectNamespace<HackathonAgent>;
   Sandbox: DurableObjectNamespace<SandboxType>;
+  SPREADSHEETS: R2Bucket;
 };
 
 type SpreadsheetRow = {
@@ -21,6 +22,7 @@ type SpreadsheetRow = {
   content_type: string;
   size_bytes: number;
   agent_name: string;
+  r2_key: string | null;
   sandbox_path: string | null;
   uploaded_at: string;
 };
@@ -178,6 +180,7 @@ async function ensureSpreadsheetInSandbox(env: Env, spreadsheet: SpreadsheetRow 
   const response = await stub.fetch("https://agent.local/restore-spreadsheet-file", {
     body: JSON.stringify({
       filename: spreadsheet.filename,
+      r2Key: spreadsheet.r2_key,
       sandboxPath: spreadsheet.sandbox_path,
       spreadsheetId: spreadsheet.id,
     }),
@@ -244,6 +247,10 @@ function safeFilename(filename: string) {
   return filename.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+function r2KeyForSpreadsheet(id: string, filename: string) {
+  return `spreadsheets/${id}/${safeFilename(filename)}`;
+}
+
 function isSpreadsheetFile(file: File) {
   const name = file.name.toLowerCase();
   return (
@@ -259,7 +266,7 @@ function isSpreadsheetFile(file: File) {
 async function listSpreadsheets(env: Env) {
   const { results } = await env.DB.prepare(
     [
-      "SELECT id, filename, content_type, size_bytes, agent_name, sandbox_path, uploaded_at",
+      "SELECT id, filename, content_type, size_bytes, agent_name, r2_key, sandbox_path, uploaded_at",
       "FROM spreadsheets",
       "ORDER BY uploaded_at DESC",
     ].join(" "),
@@ -277,7 +284,7 @@ async function getSpreadsheet(env: Env, id: string) {
 async function getSpreadsheetRow(env: Env, id: string) {
   const spreadsheet = await env.DB.prepare(
     [
-      "SELECT id, filename, content_type, size_bytes, agent_name, sandbox_path, uploaded_at",
+      "SELECT id, filename, content_type, size_bytes, agent_name, r2_key, sandbox_path, uploaded_at",
       "FROM spreadsheets",
       "WHERE id = ?",
     ].join(" "),
@@ -304,8 +311,9 @@ async function uploadSpreadsheet(request: Request, env: Env) {
   const id = typeof requestedId === "string" && /^[a-f0-9-]{36}$/i.test(requestedId) ? requestedId : crypto.randomUUID();
   const agentName = agentNameForSpreadsheet(id);
   const sandboxPath = `/workspace/spreadsheets/${id}/${safeFilename(file.name)}`;
+  const r2Key = r2KeyForSpreadsheet(id, file.name);
   const sandbox = getSandbox(env.Sandbox, `sandbox-${id}`);
-  const fileBase64 = arrayBufferToBase64(await file.arrayBuffer());
+  const fileBuffer = await file.arrayBuffer();
   const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(agentName));
 
   await stub.fetch("https://agent.local/upload-trace", {
@@ -320,8 +328,17 @@ async function uploadSpreadsheet(request: Request, env: Env) {
   });
 
   await sandbox.mkdir(`/workspace/spreadsheets/${id}`, { recursive: true });
-  await sandbox.writeFile(sandboxPath, fileBase64, {
+  await sandbox.writeFile(sandboxPath, arrayBufferToBase64(fileBuffer), {
     encoding: "base64",
+  });
+  await env.SPREADSHEETS.put(r2Key, fileBuffer, {
+    httpMetadata: {
+      contentType: file.type || "application/octet-stream",
+    },
+    customMetadata: {
+      filename: file.name,
+      spreadsheetId: id,
+    },
   });
 
   await stub.fetch("https://agent.local/upload-trace", {
@@ -338,8 +355,8 @@ async function uploadSpreadsheet(request: Request, env: Env) {
   const fileResponse = await stub.fetch("https://agent.local/spreadsheet-file", {
     body: JSON.stringify({
       contentType: file.type || "application/octet-stream",
-      fileBase64,
       filename: file.name,
+      r2Key,
       sandboxPath,
       sizeBytes: file.size,
       spreadsheetId: id,
@@ -363,11 +380,11 @@ async function uploadSpreadsheet(request: Request, env: Env) {
   await env.DB.prepare(
     [
       "INSERT INTO spreadsheets",
-      "(id, filename, content_type, size_bytes, agent_name, sandbox_path)",
-      "VALUES (?, ?, ?, ?, ?, ?)",
+      "(id, filename, content_type, size_bytes, agent_name, r2_key, sandbox_path)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?)",
     ].join(" "),
   )
-    .bind(id, file.name, file.type || "application/octet-stream", file.size, agentName, sandboxPath)
+    .bind(id, file.name, file.type || "application/octet-stream", file.size, agentName, r2Key, sandboxPath)
     .run();
 
   return json(
@@ -472,8 +489,8 @@ export class HackathonAgent extends Think<Env> {
     if (url.pathname.endsWith("/spreadsheet-file") && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as {
         contentType?: unknown;
-        fileBase64?: unknown;
         filename?: unknown;
+        r2Key?: unknown;
         sandboxPath?: unknown;
         sizeBytes?: unknown;
         spreadsheetId?: unknown;
@@ -483,7 +500,7 @@ export class HackathonAgent extends Think<Env> {
         typeof body.spreadsheetId !== "string" ||
         typeof body.filename !== "string" ||
         typeof body.sandboxPath !== "string" ||
-        typeof body.fileBase64 !== "string" ||
+        typeof body.r2Key !== "string" ||
         typeof body.contentType !== "string" ||
         typeof body.sizeBytes !== "number"
       ) {
@@ -492,8 +509,8 @@ export class HackathonAgent extends Think<Env> {
 
       this.storeSpreadsheetFile({
         contentType: body.contentType,
-        fileBase64: body.fileBase64,
         filename: body.filename,
+        r2Key: body.r2Key,
         sandboxPath: body.sandboxPath,
         sizeBytes: body.sizeBytes,
         spreadsheetId: body.spreadsheetId,
@@ -504,6 +521,7 @@ export class HackathonAgent extends Think<Env> {
     if (url.pathname.endsWith("/restore-spreadsheet-file") && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as {
         filename?: unknown;
+        r2Key?: unknown;
         sandboxPath?: unknown;
         spreadsheetId?: unknown;
       };
@@ -516,7 +534,7 @@ export class HackathonAgent extends Think<Env> {
         return new Response("Invalid spreadsheet restore payload.", { status: 400 });
       }
 
-      await this.restoreSpreadsheetFile(body.spreadsheetId, body.filename, body.sandboxPath);
+      await this.restoreSpreadsheetFile(body.spreadsheetId, body.filename, body.sandboxPath, body.r2Key);
       return json({ ok: true });
     }
 
@@ -701,10 +719,18 @@ export class HackathonAgent extends Think<Env> {
         content_type TEXT NOT NULL,
         size_bytes INTEGER NOT NULL,
         sandbox_path TEXT NOT NULL,
-        file_base64 TEXT NOT NULL,
+        r2_key TEXT,
+        file_base64 TEXT,
         updated_at TEXT NOT NULL
       )
     `;
+    try {
+      this.ctx.storage.sql.exec("ALTER TABLE agent_spreadsheet_files ADD COLUMN r2_key TEXT");
+    } catch (error) {
+      if (!(error instanceof Error ? error.message : String(error)).toLowerCase().includes("duplicate column")) {
+        throw error;
+      }
+    }
     this.sql`
       CREATE TABLE IF NOT EXISTS document_analysis (
         spreadsheet_id TEXT PRIMARY KEY,
@@ -928,8 +954,8 @@ export class HackathonAgent extends Think<Env> {
 
   private storeSpreadsheetFile(input: {
     contentType: string;
-    fileBase64: string;
     filename: string;
+    r2Key: string;
     sandboxPath: string;
     sizeBytes: number;
     spreadsheetId: string;
@@ -942,7 +968,7 @@ export class HackathonAgent extends Think<Env> {
         content_type,
         size_bytes,
         sandbox_path,
-        file_base64,
+        r2_key,
         updated_at
       )
       VALUES (
@@ -951,7 +977,7 @@ export class HackathonAgent extends Think<Env> {
         ${input.contentType},
         ${input.sizeBytes},
         ${input.sandboxPath},
-        ${input.fileBase64},
+        ${input.r2Key},
         ${new Date().toISOString()}
       )
       ON CONFLICT(spreadsheet_id) DO UPDATE SET
@@ -959,27 +985,36 @@ export class HackathonAgent extends Think<Env> {
         content_type = excluded.content_type,
         size_bytes = excluded.size_bytes,
         sandbox_path = excluded.sandbox_path,
-        file_base64 = excluded.file_base64,
+        r2_key = excluded.r2_key,
         updated_at = excluded.updated_at
     `;
   }
 
-  private async restoreSpreadsheetFile(spreadsheetId: string, filename: string, sandboxPath: string) {
+  private async restoreSpreadsheetFile(spreadsheetId: string, filename: string, sandboxPath: string, r2Key?: unknown) {
     this.ensureFileSchema();
     const rows = this.sql<{
-      file_base64: string;
+      file_base64: string | null;
+      r2_key: string | null;
     }>`
-      SELECT file_base64
+      SELECT file_base64, r2_key
       FROM agent_spreadsheet_files
       WHERE spreadsheet_id = ${spreadsheetId}
       LIMIT 1
     `;
 
-    if (!rows.length) {
+    const key = typeof r2Key === "string" ? r2Key : rows[0]?.r2_key;
+    const object = key ? await this.env.SPREADSHEETS.get(key) : null;
+    let fileBase64 = rows[0]?.file_base64 ?? null;
+
+    if (object) {
+      fileBase64 = arrayBufferToBase64(await object.arrayBuffer());
+    }
+
+    if (!fileBase64) {
       throw new Error(
         [
-          `The sandbox file for ${filename} is missing and this older upload has no durable agent copy to restore from.`,
-          "Re-upload the spreadsheet to seed this agent's durable file store.",
+          `The sandbox file for ${filename} is missing and no R2 object was available to restore it.`,
+          "Re-upload the spreadsheet to seed R2 storage.",
         ].join(" "),
       );
     }
@@ -987,7 +1022,7 @@ export class HackathonAgent extends Think<Env> {
     const sandbox = getSandbox(this.env.Sandbox, `sandbox-${spreadsheetId}`);
     const directory = sandboxPath.slice(0, sandboxPath.lastIndexOf("/"));
     await sandbox.mkdir(directory, { recursive: true });
-    await sandbox.writeFile(sandboxPath, rows[0].file_base64, {
+    await sandbox.writeFile(sandboxPath, fileBase64, {
       encoding: "base64",
     });
   }
