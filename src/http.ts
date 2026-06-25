@@ -24,6 +24,9 @@ export type Env = {
   SPREADSHEETS: R2Bucket;
 };
 
+const DEFAULT_AI_GATEWAY_PROVIDER = "anthropic";
+const DEFAULT_AI_GATEWAY_MODEL = "claude-sonnet-4-6";
+
 export type SpreadsheetRow = {
   id: string;
   filename: string;
@@ -300,7 +303,7 @@ export function configuredModelEntries(env: Env) {
   if (fallbackEntries?.length) {
     return fallbackEntries.map((entry) => {
       const separator = entry.indexOf(":");
-      if (separator < 1) return { model: entry, provider: env.AI_GATEWAY_PROVIDER ?? "openai" };
+      if (separator < 1) return { model: entry, provider: env.AI_GATEWAY_PROVIDER ?? DEFAULT_AI_GATEWAY_PROVIDER };
       return {
         model: entry.slice(separator + 1).trim(),
         provider: entry.slice(0, separator).trim(),
@@ -310,8 +313,8 @@ export function configuredModelEntries(env: Env) {
 
   return [
     {
-      model: env.AI_GATEWAY_MODEL ?? "gpt-5.5",
-      provider: env.AI_GATEWAY_PROVIDER ?? "openai",
+      model: env.AI_GATEWAY_MODEL ?? DEFAULT_AI_GATEWAY_MODEL,
+      provider: env.AI_GATEWAY_PROVIDER ?? DEFAULT_AI_GATEWAY_PROVIDER,
     },
   ];
 }
@@ -319,8 +322,8 @@ export function configuredModelEntries(env: Env) {
 export function modelConfig(env: Env) {
   const entries = configuredModelEntries(env);
   const primary = entries[0] ?? {
-    model: "gpt-5.5",
-    provider: "openai",
+    model: DEFAULT_AI_GATEWAY_MODEL,
+    provider: DEFAULT_AI_GATEWAY_PROVIDER,
   };
 
   return {
@@ -595,7 +598,6 @@ async function uploadSpreadsheet(request: Request, env: Env) {
   const agentName = agentNameForSpreadsheet(id);
   const sandboxPath = `/workspace/spreadsheets/${id}/${safeFilename(file.name)}`;
   const r2Key = revisionR2KeyForSpreadsheet(id, revisionNumber, file.name);
-  const sandbox = getSandbox(env.Sandbox, `sandbox-${id}`);
   const fileBuffer = await file.arrayBuffer();
   const stub = env.SheetsThink.get(env.SheetsThink.idFromName(agentName));
   let revision: SpreadsheetRevisionRow | null = null;
@@ -633,7 +635,6 @@ async function uploadSpreadsheet(request: Request, env: Env) {
     method: "POST",
   });
 
-  let shouldDestroySandbox = false;
   try {
     await env.SPREADSHEETS.put(r2Key, fileBuffer, {
       httpMetadata: {
@@ -665,23 +666,6 @@ async function uploadSpreadsheet(request: Request, env: Env) {
         spanType: "upload",
         status: "done",
         title: "Stored file in R2",
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    });
-
-    await sandbox.mkdir(`/workspace/spreadsheets/${id}`, { recursive: true });
-    await sandbox.writeFile(sandboxPath, arrayBufferToBase64(fileBuffer), {
-      encoding: "base64",
-    });
-    shouldDestroySandbox = true;
-
-    await stub.fetch("https://agent.local/upload-trace", {
-      body: JSON.stringify({
-        detail: { sandboxPath },
-        spanType: "upload",
-        status: "done",
-        title: "Stored file in sandbox",
       }),
       headers: { "content-type": "application/json" },
       method: "POST",
@@ -730,7 +714,7 @@ async function uploadSpreadsheet(request: Request, env: Env) {
     } else {
       await stub.fetch("https://agent.local/upload-trace", {
         body: JSON.stringify({
-          detail: "File is available in R2 and the sandbox; codemode pre-extraction was skipped.",
+          detail: "File is durable in R2; codemode pre-extraction was skipped.",
           spanType: "ingestion",
           status: "done",
           title: "Pre-extraction skipped",
@@ -771,10 +755,6 @@ async function uploadSpreadsheet(request: Request, env: Env) {
       method: "POST",
     });
     throw error;
-  } finally {
-    if (shouldDestroySandbox) {
-      await destroyUploadSandbox(sandbox, stub);
-    }
   }
 
   return json(
@@ -815,12 +795,10 @@ async function uploadSpreadsheetRevision(request: Request, env: Env, spreadsheet
   const revisionNumber = await nextSpreadsheetRevisionNumber(env, spreadsheetId);
   const sandboxPath = `/workspace/spreadsheets/${spreadsheetId}/${safeFilename(file.name)}`;
   const r2Key = revisionR2KeyForSpreadsheet(spreadsheetId, revisionNumber, file.name);
-  const sandbox = getSandbox(env.Sandbox, `sandbox-${spreadsheetId}`);
   const fileBuffer = await file.arrayBuffer();
   const stub = env.SheetsThink.get(env.SheetsThink.idFromName(existingSpreadsheet.agent_name));
   const contentType = file.type || "application/octet-stream";
   let revision: SpreadsheetRevisionRow | null = null;
-  let shouldDestroySandbox = false;
 
   try {
     await env.SPREADSHEETS.put(r2Key, fileBuffer, {
@@ -842,12 +820,6 @@ async function uploadSpreadsheetRevision(request: Request, env: Env, spreadsheet
       spreadsheetId,
       summary: `Revision ${revisionNumber} uploaded as ${file.name}. Previous latest file was ${existingSpreadsheet.filename}.`,
     });
-
-    await sandbox.mkdir(`/workspace/spreadsheets/${spreadsheetId}`, { recursive: true });
-    await sandbox.writeFile(sandboxPath, arrayBufferToBase64(fileBuffer), {
-      encoding: "base64",
-    });
-    shouldDestroySandbox = true;
 
     const fileResponse = await stub.fetch("https://agent.local/spreadsheet-file", {
       body: JSON.stringify({
@@ -892,10 +864,6 @@ async function uploadSpreadsheetRevision(request: Request, env: Env, spreadsheet
     }
   } catch (error) {
     throw error;
-  } finally {
-    if (shouldDestroySandbox) {
-      await destroyUploadSandbox(sandbox, stub);
-    }
   }
 
   const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
@@ -1372,46 +1340,6 @@ async function deleteSpreadsheet(env: Env, spreadsheetId: string) {
   }
 
   return json({ ok: true });
-}
-
-async function destroyUploadSandbox(sandbox: ReturnType<typeof getSandbox>, stub: DurableObjectStub) {
-  const startedAt = Date.now();
-  await stub.fetch("https://agent.local/upload-trace", {
-    body: JSON.stringify({
-      detail: "Releasing upload sandbox container; the spreadsheet is durable in R2 and can be restored later.",
-      spanType: "upload",
-      status: "running",
-      title: "Releasing sandbox",
-    }),
-    headers: { "content-type": "application/json" },
-    method: "POST",
-  });
-
-  try {
-    await sandbox.destroy();
-    await stub.fetch("https://agent.local/upload-trace", {
-      body: JSON.stringify({
-        durationMs: Date.now() - startedAt,
-        spanType: "upload",
-        status: "done",
-        title: "Sandbox released",
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    });
-  } catch (error) {
-    await stub.fetch("https://agent.local/upload-trace", {
-      body: JSON.stringify({
-        detail: error instanceof Error ? error.message : String(error),
-        durationMs: Date.now() - startedAt,
-        spanType: "upload",
-        status: "error",
-        title: "Sandbox release failed",
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    });
-  }
 }
 
 export default {

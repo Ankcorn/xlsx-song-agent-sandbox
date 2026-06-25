@@ -527,6 +527,24 @@ def cm_rows_to_records(rows, header_index=None, include_blank=False):
         })
     return records
 
+def cm_ods_records_by_sheet(path, max_sheets=None, max_rows_per_sheet=None, max_cells_per_row=120, include_blank=False):
+    output = {}
+    for sheet_name, rows in cm_ods_rows_by_sheet(
+        path,
+        max_sheets=max_sheets,
+        max_rows_per_sheet=max_rows_per_sheet,
+        max_cells_per_row=max_cells_per_row,
+    ).items():
+        header_index = cm_detect_header_row(rows)
+        records = cm_rows_to_records(rows, header_index=header_index, include_blank=include_blank)
+        output[sheet_name] = {
+            "header_index": header_index,
+            "profile": cm_profile_rows(rows),
+            "records": records,
+            "rows": rows,
+        }
+    return output
+
 def cm_unpivot_records(records, id_columns, variable_name="measure", value_name="value"):
     output = []
     id_set = set(id_columns)
@@ -1696,23 +1714,32 @@ export class SheetsThink extends Think<Env> {
         "from numpy",
         "import odf",
         "from odf",
+        "import zipfile",
+        "from zipfile",
+        "xml.etree",
+        "et.iterparse",
+        "content.xml",
+        "table-cell",
+        "number-columns-repeated",
+        "number-rows-repeated",
       ];
       const match = forbidden.find((item) => lowerCode.includes(item));
       if (match) {
-        return `ODS extractors must not use pandas/numpy/odf/read_excel because they exceed sandbox memory. Found forbidden code: ${match}. Use cm_ods_rows_by_sheet or cm_iter_ods_rows instead.`;
+        return `ODS extractors must not use pandas/numpy/odf/read_excel or custom zip/XML parsing because they exceed sandbox memory. Found forbidden code: ${match}. Use cm_ods_records_by_sheet, cm_ods_rows_by_sheet, or cm_iter_ods_rows instead.`;
       }
     }
     const lineCount = code.split(/\r?\n/).length;
-    if (lineCount > 260) {
-      return `Generated extraction code is too large (${lineCount} lines). Keep it under 260 lines by composing cm_* helpers instead of writing generic parser infrastructure.`;
+    if (lineCount > 420) {
+      return `Generated extraction code is too large (${lineCount} lines). Keep it under 420 lines by composing cm_* helpers instead of writing generic parser infrastructure.`;
     }
-    if (code.length > 24_000) {
-      return `Generated extraction code is too large (${code.length} chars). Keep it under 24000 chars by composing cm_* helpers.`;
+    if (code.length > 48_000) {
+      return `Generated extraction code is too large (${code.length} chars). Keep it under 48000 chars by composing cm_* helpers.`;
     }
     return null;
   }
 
   private codemodeExtractionPrompt(filename: string, profile: unknown, design: unknown, previousProblem?: string) {
+    const isOds = filename.toLowerCase().endsWith(".ods");
     return [
       "You are in codemode. Generate a complete Python script that reads the uploaded spreadsheet at SPREADSHEET_PATH and prints one JSON object to stdout.",
       "Do not explain the code. Return only Python code, with no markdown fences.",
@@ -1721,6 +1748,7 @@ export class SheetsThink extends Think<Env> {
       "A trusted helper prelude is already loaded before your script. Reuse these helpers instead of reimplementing generic parsers:",
       "- cm_ods_rows_by_sheet(path, max_sheets=None, max_rows_per_sheet=None, max_cells_per_row=120): memory-safe ODS row extraction from content.xml.",
       "- cm_iter_ods_rows(path, ...): streaming-style ODS rows with sheet_name, source_row, source_ref, values.",
+      "- cm_ods_records_by_sheet(path, ...): ODS sheets converted into records with source_row/source_ref, header detection, row profile, and original rows.",
       "- cm_read_delimited_rows(path, delimiter=None, max_rows=None): CSV/TSV rows with provenance.",
       "- cm_normalize_value(value) and cm_emit_extraction(payload).",
       "- cm_detect_header_row(rows), cm_rows_to_records(rows, header_index=None), cm_unpivot_records(records, id_columns, variable_name='measure', value_name='value'), and cm_profile_rows(rows).",
@@ -1732,7 +1760,10 @@ export class SheetsThink extends Think<Env> {
       "- Preserve all meaningful spreadsheet/XML/CSV data, either in semantic tables or an audit/source table if needed.",
       "- Include source_row and source_ref for every extracted row so answers can point back to the original document.",
       "- Include a metadata table worth of content in the metadata object: category, domain, measures, dimensions, units, geography, time period, caveats, source summary, and extraction notes.",
-      "- For ODS files, you MUST use cm_ods_rows_by_sheet or cm_iter_ods_rows. Do not import pandas, numpy, odf, or call read_excel for ODS.",
+      "- For ODS files, the script MUST NOT implement XML parsing, zipfile parsing, repeated-cell handling, or generic ODS infrastructure. That is already handled by the helper prelude.",
+      "- For ODS files, start with sheets = cm_ods_records_by_sheet(path) or rows_by_sheet = cm_ods_rows_by_sheet(path). Then filter/map/unpivot those rows into domain tables.",
+      "- For ODS files, do not import pandas, numpy, odf, zipfile, xml.etree, or call read_excel.",
+      "- For ODS files, generated code should usually be 40-220 lines: constants, small normalization functions, table-specific mapping loops, metadata, cm_emit_extraction(payload).",
       "- For XLSX/XLS files, pandas or openpyxl are allowed when useful.",
       "- For CSV/TSV, expect messy real-world files: metadata rows, inconsistent column counts, BOMs, quoted delimiters, blank lines, and semicolon/pipe/tab/comma delimiters.",
       "- For CSV/TSV, sniff the delimiter with csv.Sniffer over a large sample when possible. If using pandas.read_csv, prefer engine='python', dtype=object, keep_default_na=False, encoding='utf-8-sig', and on_bad_lines='skip'.",
@@ -1740,7 +1771,17 @@ export class SheetsThink extends Think<Env> {
       "- Normalize NaN, Infinity, pandas.NA, timestamps, decimals, and numpy values into valid JSON values.",
       "- Print with json.dumps(..., ensure_ascii=False, allow_nan=False).",
       "- Never print Python dict reprs, comments, logs, warnings, or NaN tokens.",
-      "- Keep the script under 260 lines. Compose helpers; do not write generic parsing frameworks.",
+      "- Keep the script under 420 lines. Compose helpers; do not write generic parsing frameworks.",
+      isOds
+        ? [
+            "ODS recipe to follow:",
+            "sheets = cm_ods_records_by_sheet(path)",
+            "for each needed sheet: records = sheets.get(sheet_name, {}).get('records', [])",
+            "build table rows by reading record['cells'] and preserving record['source_row']/record['source_ref']",
+            "use cm_unpivot_records when quarter/indicator/value columns need turning into observations",
+            "finish with cm_emit_extraction(payload)",
+          ].join("\n")
+        : "",
       previousProblem ? `Previous generated code was rejected: ${previousProblem}` : "",
       `Filename: ${filename}`,
       "Compact inspection profile:",
@@ -1787,7 +1828,7 @@ export class SheetsThink extends Think<Env> {
             previousProblem = problem;
             lastError = new Error(problem);
             this.recordTrace({
-              detail: traceDetail("The generated extraction code used a memory-heavy parser and was rejected before sandbox execution.", {
+              detail: traceDetail("The generated extraction code was rejected before sandbox execution.", {
                 code,
                 problem,
               }),

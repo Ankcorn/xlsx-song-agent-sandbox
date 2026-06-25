@@ -36,23 +36,19 @@ export class ExtractionWorkflow extends WorkflowEntrypoint<Env, ExtractionWorkfl
         if (!response.ok) throw new Error((await response.text()) || "Failed to persist spreadsheet file metadata.");
       });
 
-      const analysis = await step.do(
-        "run codemode extraction",
-        { retries: { backoff: "exponential", delay: "10 seconds", limit: 2 } },
-        async () => {
-          const response = await stub.fetch("https://agent.local/retry-extraction", {
-            body: JSON.stringify({
-              filename: payload.filename,
-              sandboxPath: payload.sandboxPath,
-              spreadsheetId: payload.spreadsheetId,
-            }),
-            headers: { "content-type": "application/json" },
-            method: "POST",
-          });
-          if (!response.ok) throw new Error((await response.text()) || "Failed to analyze spreadsheet file.");
-          return response.json() as Promise<Record<string, string | number>>;
-        },
-      );
+      const analysis = await step.do("run codemode extraction", async () => {
+        const response = await stub.fetch("https://agent.local/retry-extraction", {
+          body: JSON.stringify({
+            filename: payload.filename,
+            sandboxPath: payload.sandboxPath,
+            spreadsheetId: payload.spreadsheetId,
+          }),
+          headers: { "content-type": "application/json" },
+          method: "POST",
+        });
+        if (!response.ok) throw new Error((await response.text()) || "Failed to analyze spreadsheet file.");
+        return response.json() as Promise<Record<string, string | number>>;
+      });
 
       await step.do("mark spreadsheet ready", async () => {
         await this.env.DB.prepare(
@@ -84,4 +80,3 @@ export class ExtractionWorkflow extends WorkflowEntrypoint<Env, ExtractionWorkfl
     }
   }
 }
-
