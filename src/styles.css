@@ -225,6 +225,11 @@ h2 {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
   min-height: 0;
+  transition: grid-template-columns 180ms ease;
+}
+
+.chat-main.trace-collapsed {
+  grid-template-columns: minmax(0, 1fr) 56px;
 }
 
 .messages {
@@ -286,7 +291,44 @@ h2 {
 }
 
 .trace-panel header {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
   margin-bottom: 16px;
+}
+
+.trace-toggle {
+  align-items: center;
+  background: white;
+  border: 1px solid #cbd4df;
+  border-radius: 8px;
+  color: #334155;
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 34px;
+  justify-content: center;
+  padding: 0;
+  width: 34px;
+}
+
+.trace-toggle:hover {
+  border-color: #2f6f73;
+  color: #12343b;
+}
+
+.trace-panel.is-collapsed {
+  align-items: start;
+  padding: 18px 10px;
+}
+
+.trace-panel.is-collapsed header {
+  margin-bottom: 0;
+}
+
+.trace-panel.is-collapsed .trace-heading {
+  display: none;
 }
 
 .trace-empty {
@@ -425,9 +467,19 @@ h2 {
     grid-template-columns: 1fr;
   }
 
+  .chat-main.trace-collapsed {
+    grid-template-columns: 1fr;
+  }
+
   .trace-panel {
     border-left: 0;
     border-top: 1px solid #d9dee5;
     max-height: 360px;
+  }
+
+  .trace-panel.is-collapsed {
+    max-height: 72px;
+    padding-bottom: 18px;
+    padding-top: 18px;
   }
 }

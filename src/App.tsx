@@ -10,7 +10,7 @@ import {
   useNavigate,
   useParams,
 } from "@tanstack/react-router";
-import { ArrowLeft, FileSpreadsheet, Loader2, Plus, Send, Upload } from "lucide-react";
+import { ArrowLeft, FileSpreadsheet, Loader2, PanelRightClose, PanelRightOpen, Plus, Send, Upload } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -341,6 +341,7 @@ function ChatSurface({
   });
   const { messages, sendMessage, status } = useAgentChat({ agent });
   const isBusy = status === "submitted" || status === "streaming";
+  const [isTraceCollapsed, setIsTraceCollapsed] = useState(false);
 
   const visibleMessages = useMemo(
     () => messages.filter((message) => textFromParts(message.parts).trim().length > 0),
@@ -387,7 +388,7 @@ function ChatSurface({
         </div>
       </header>
 
-      <div className="chat-main">
+      <div className={`chat-main ${isTraceCollapsed ? "trace-collapsed" : ""}`}>
         <div className="messages">
           {visibleMessages.length === 0 ? (
             <div className="empty-state">
@@ -404,38 +405,51 @@ function ChatSurface({
           )}
         </div>
 
-        <aside className="trace-panel">
+        <aside className={`trace-panel ${isTraceCollapsed ? "is-collapsed" : ""}`}>
           <header>
-            <p className="eyebrow">Trace</p>
-            <h2>Agent steps</h2>
+            <div className="trace-heading">
+              <p className="eyebrow">Trace</p>
+              <h2>Agent steps</h2>
+            </div>
+            <button
+              aria-label={isTraceCollapsed ? "Expand trace panel" : "Collapse trace panel"}
+              className="trace-toggle"
+              onClick={() => setIsTraceCollapsed((value) => !value)}
+              title={isTraceCollapsed ? "Expand trace panel" : "Collapse trace panel"}
+              type="button"
+            >
+              {isTraceCollapsed ? <PanelRightOpen size={18} /> : <PanelRightClose size={18} />}
+            </button>
           </header>
-          {traces.length === 0 ? (
-            <p className="trace-empty">No agent steps yet.</p>
-          ) : (
-            <ol className="trace-list">
-              {traces.map((trace) => {
-                const detail = formatTraceDetail(trace.detail);
-                return (
-                  <li className={`trace-item ${trace.status}`} key={trace.id}>
-                    <div>
-                      <span className="trace-dot" />
-                    </div>
-                    <article>
-                      <div className="trace-title-row">
-                        <h3>{trace.title}</h3>
-                        {trace.duration_ms ? <span>{trace.duration_ms}ms</span> : null}
+          <div className="trace-content" hidden={isTraceCollapsed}>
+            {traces.length === 0 ? (
+              <p className="trace-empty">No agent steps yet.</p>
+            ) : (
+              <ol className="trace-list">
+                {traces.map((trace) => {
+                  const detail = formatTraceDetail(trace.detail);
+                  return (
+                    <li className={`trace-item ${trace.status}`} key={trace.id}>
+                      <div>
+                        <span className="trace-dot" />
                       </div>
-                      <p>
-                        {trace.span_type}
-                        {trace.step_number !== null ? ` · step ${trace.step_number}` : ""}
-                      </p>
-                      {detail ? <pre>{detail}</pre> : null}
-                    </article>
-                  </li>
-                );
-              })}
-            </ol>
-          )}
+                      <article>
+                        <div className="trace-title-row">
+                          <h3>{trace.title}</h3>
+                          {trace.duration_ms ? <span>{trace.duration_ms}ms</span> : null}
+                        </div>
+                        <p>
+                          {trace.span_type}
+                          {trace.step_number !== null ? ` · step ${trace.step_number}` : ""}
+                        </p>
+                        {detail ? <pre>{detail}</pre> : null}
+                      </article>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </div>
         </aside>
       </div>
 
