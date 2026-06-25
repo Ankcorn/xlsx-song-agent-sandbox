@@ -4,7 +4,7 @@ import { routeAgentRequest } from "agents";
 import { createAiGateway } from "ai-gateway-provider";
 import { createAnthropic } from "ai-gateway-provider/providers/anthropic";
 import { createOpenAI } from "ai-gateway-provider/providers/openai";
-import { generateText, tool } from "ai";
+import { generateText, stepCountIs, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 
@@ -58,6 +58,12 @@ type AgentTraceEvent = {
   step_number: number | null;
   duration_ms: number | null;
   created_at: string;
+};
+
+type AgentRequestPayload = {
+  agentName?: unknown;
+  message?: unknown;
+  spreadsheetId?: unknown;
 };
 
 type CodemodeExtraction = {
@@ -633,6 +639,51 @@ async function uploadSpreadsheet(request: Request, env: Env) {
   );
 }
 
+async function sendAgentRequest(request: Request, env: Env) {
+  const body = (await request.json().catch(() => ({}))) as AgentRequestPayload;
+  if (typeof body.message !== "string" || !body.message.trim()) {
+    return json({ error: "Send JSON with a non-empty 'message' string." }, { status: 400 });
+  }
+
+  let agentName = typeof body.agentName === "string" && body.agentName.trim() ? body.agentName.trim() : "api-agent";
+
+  if (typeof body.spreadsheetId === "string" && body.spreadsheetId.trim()) {
+    const spreadsheet = await getSpreadsheetRow(env, body.spreadsheetId.trim());
+    if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+    agentName = spreadsheet.agent_name;
+  }
+
+  return sendAgentMessage(env, agentName, body.message);
+}
+
+async function sendSpreadsheetAgentRequest(request: Request, env: Env, spreadsheetId: string) {
+  const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
+  if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+
+  const body = (await request.json().catch(() => ({}))) as AgentRequestPayload;
+  if (typeof body.message !== "string" || !body.message.trim()) {
+    return json({ error: "Send JSON with a non-empty 'message' string." }, { status: 400 });
+  }
+
+  return sendAgentMessage(env, spreadsheet.agent_name, body.message);
+}
+
+async function sendAgentMessage(env: Env, agentName: string, message: string) {
+  const id = env.HackathonAgent.idFromName(agentName);
+  const stub = env.HackathonAgent.get(id);
+  const response = await stub.fetch("https://agent.local/api-request", {
+    body: JSON.stringify({ message }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
+
+  const data = await response
+    .clone()
+    .json()
+    .catch(async () => ({ error: await response.text() }));
+  return json(data, { status: response.status });
+}
+
 export class HackathonAgent extends Think<Env> {
   private fileSchemaReady = false;
   private traceSchemaReady = false;
@@ -726,6 +777,63 @@ export class HackathonAgent extends Think<Env> {
     const url = new URL(request.url);
     if (url.pathname.endsWith("/traces")) {
       return json({ traces: this.listTraces(url.searchParams.get("since")) });
+    }
+
+    if (url.pathname.endsWith("/api-request") && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as AgentRequestPayload;
+      if (typeof body.message !== "string" || !body.message.trim()) {
+        return json({ error: "Send JSON with a non-empty 'message' string." }, { status: 400 });
+      }
+
+      const requestId = crypto.randomUUID();
+      const startedAt = Date.now();
+      this.recordTrace({
+        detail: { message: body.message },
+        requestId,
+        spanType: "api",
+        status: "running",
+        title: "API request received",
+      });
+
+      try {
+        const result = await generateText({
+          model: this.getModel(),
+          prompt: body.message,
+          stopWhen: stepCountIs(6),
+          system: this.getSystemPrompt(),
+          temperature: 0.2,
+          tools: this.getTools(),
+        });
+
+        this.recordTrace({
+          detail: { finishReason: result.finishReason, usage: result.usage },
+          durationMs: Date.now() - startedAt,
+          requestId,
+          spanType: "api",
+          status: "done",
+          title: "API request complete",
+        });
+
+        return json({
+          agentName: this.name,
+          requestId,
+          response: result.text,
+        });
+      } catch (error) {
+        this.recordTrace({
+          detail: error instanceof Error ? error.message : String(error),
+          durationMs: Date.now() - startedAt,
+          requestId,
+          spanType: "api",
+          status: "error",
+          title: "API request failed",
+        });
+
+        return json(
+          { error: error instanceof Error ? error.message : "Agent request failed.", requestId },
+          { status: 500 },
+        );
+      }
     }
 
     if (url.pathname.endsWith("/upload-trace") && request.method === "POST") {
@@ -1426,6 +1534,10 @@ export default {
       return Response.json(await runPython(env, code));
     }
 
+    if (url.pathname === "/api/agent/request" && request.method === "POST") {
+      return sendAgentRequest(request, env);
+    }
+
     if (url.pathname === "/api/spreadsheets" && request.method === "GET") {
       return listSpreadsheets(env);
     }
@@ -1444,6 +1556,11 @@ export default {
           ? body.code
           : "print(open(SPREADSHEET_PATH, 'r', encoding='utf-8').read())";
       return json(await runPython(env, code, spreadsheet));
+    }
+
+    const spreadsheetAgentRequestMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/agent-request$/);
+    if (spreadsheetAgentRequestMatch && request.method === "POST") {
+      return sendSpreadsheetAgentRequest(request, env, spreadsheetAgentRequestMatch[1]);
     }
 
     const spreadsheetTraceMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/traces$/);

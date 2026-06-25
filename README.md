@@ -30,6 +30,34 @@ Expected shape:
 }
 ```
 
+## Agent API
+
+Send a JSON request to a retained agent:
+
+```bash
+curl -X POST http://localhost:5173/api/agent/request \
+  -H "content-type: application/json" \
+  -d '{"message":"What can you help me with?"}'
+```
+
+Send a request to a spreadsheet's retained agent:
+
+```bash
+curl -X POST http://localhost:5173/api/spreadsheets/<spreadsheet-id>/agent-request \
+  -H "content-type: application/json" \
+  -d '{"message":"Summarize this spreadsheet."}'
+```
+
+Expected shape:
+
+```json
+{
+  "agentName": "spreadsheet-...",
+  "requestId": "...",
+  "response": "..."
+}
+```
+
 ## Spreadsheet flow
 
 - `/` lists uploaded spreadsheets from D1.
