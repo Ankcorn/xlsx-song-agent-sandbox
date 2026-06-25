@@ -368,8 +368,14 @@ function parseJsonRenderSpec(text: string): Spec | null {
   return null;
 }
 
-function ChatMessage({ message }: { message: RenderedMessage }) {
+function isJsonRenderStreamCandidate(text: string) {
+  const trimmed = text.trimStart();
+  return trimmed.startsWith("{") || trimmed.startsWith("```json") || trimmed.startsWith("```");
+}
+
+function ChatMessage({ isStreaming = false, message }: { isStreaming?: boolean; message: RenderedMessage }) {
   const spec = message.role === "assistant" ? parseJsonRenderSpec(message.text) : null;
+  const isRenderingJson = message.role === "assistant" && isStreaming && !spec && isJsonRenderStreamCandidate(message.text);
 
   return (
     <article className={`message ${message.role}`}>
@@ -377,6 +383,14 @@ function ChatMessage({ message }: { message: RenderedMessage }) {
       {spec ? (
         <div className="json-render-message">
           <JsonRenderReport spec={spec} />
+        </div>
+      ) : isRenderingJson ? (
+        <div className="json-render-loading">
+          <Loader size="sm" />
+          <div>
+            <strong>Rendering answer</strong>
+            <p>Building the interactive report...</p>
+          </div>
         </div>
       ) : (
         <p>{message.text}</p>
@@ -1342,8 +1356,12 @@ function ChatSurface({
                   }
                 />
               ) : (
-                renderedMessages.map((message) => (
-                  <ChatMessage key={message.id} message={message} />
+                renderedMessages.map((message, index) => (
+                  <ChatMessage
+                    key={message.id}
+                    isStreaming={isBusy && message.role === "assistant" && index === renderedMessages.length - 1}
+                    message={message}
+                  />
                 ))
               )}
             </div>
@@ -2040,7 +2058,13 @@ function AgentChatPage() {
             </div>
             {renderedMessages.length === 0 ? (
               <Empty className="empty-state" icon={<Bot size={38} />} size="sm" title="Agent ready" description="Ask across the copied SQLite working database." />
-            ) : renderedMessages.map((message) => <ChatMessage key={message.id} message={message} />)}
+            ) : renderedMessages.map((message, index) => (
+              <ChatMessage
+                key={message.id}
+                isStreaming={isBusy && message.role === "assistant" && index === renderedMessages.length - 1}
+                message={message}
+              />
+            ))}
             <SQLiteViewer analysisTables={analysisTables} error={viewerError} isLoading={isViewerLoading} selectedTable={selectedTable} setSelectedTable={setSelectedTable} tableData={tableData} />
           </div>
           <form className="composer" onSubmit={submitMessage}>

@@ -474,6 +474,18 @@
     @apply grid w-full min-w-0 gap-5;
   }
 
+  .json-render-loading {
+    @apply grid min-w-72 grid-cols-[auto_minmax(0,1fr)] items-center gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-4 text-zinc-600;
+  }
+
+  .json-render-loading strong {
+    @apply block text-sm font-semibold text-zinc-900;
+  }
+
+  .json-render-loading p {
+    @apply mt-0.5 text-sm leading-snug text-zinc-500;
+  }
+
   .llm-report {
     @apply grid w-full min-w-0 gap-5 text-zinc-900;
   }
