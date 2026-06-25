@@ -43,6 +43,19 @@ type SpreadsheetRow = {
   uploaded_at: string;
 };
 
+type SpreadsheetRevisionRow = {
+  id: string;
+  spreadsheet_id: string;
+  revision_number: number;
+  action: "upload" | "revision_upload";
+  filename: string;
+  r2_key: string;
+  size_bytes: number;
+  content_type: string;
+  summary: string | null;
+  created_at: string;
+};
+
 type LibraryAgentRow = {
   id: string;
   name: string;
@@ -716,6 +729,10 @@ function r2KeyForSpreadsheet(id: string, filename: string) {
   return `spreadsheets/${id}/${safeFilename(filename)}`;
 }
 
+function revisionR2KeyForSpreadsheet(id: string, revisionNumber: number, filename: string) {
+  return `spreadsheets/${id}/revisions/${revisionNumber}/${safeFilename(filename)}`;
+}
+
 function isSpreadsheetFile(file: File) {
   const name = file.name.toLowerCase();
   return (
@@ -778,6 +795,83 @@ async function getSpreadsheetRow(env: Env, id: string) {
   return spreadsheet;
 }
 
+async function nextSpreadsheetRevisionNumber(env: Env, spreadsheetId: string) {
+  const row = await env.DB.prepare(
+    "SELECT COALESCE(MAX(revision_number), 0) + 1 AS revision_number FROM spreadsheet_revisions WHERE spreadsheet_id = ?",
+  )
+    .bind(spreadsheetId)
+    .first<{ revision_number: number }>();
+
+  return row?.revision_number ?? 1;
+}
+
+async function listSpreadsheetRevisionRows(env: Env, spreadsheetId: string) {
+  const { results } = await env.DB.prepare(
+    [
+      "SELECT id, spreadsheet_id, revision_number, action, filename, r2_key, size_bytes, content_type, summary, created_at",
+      "FROM spreadsheet_revisions",
+      "WHERE spreadsheet_id = ?",
+      "ORDER BY revision_number DESC",
+    ].join(" "),
+  )
+    .bind(spreadsheetId)
+    .all<SpreadsheetRevisionRow>();
+
+  return results ?? [];
+}
+
+async function listSpreadsheetRevisions(env: Env, spreadsheetId: string) {
+  const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
+  if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+  const revisions = await listSpreadsheetRevisionRows(env, spreadsheetId);
+  return json({ revisions, spreadsheet });
+}
+
+async function recordSpreadsheetRevision(
+  env: Env,
+  input: {
+    action: SpreadsheetRevisionRow["action"];
+    contentType: string;
+    filename: string;
+    r2Key: string;
+    revisionNumber: number;
+    sizeBytes: number;
+    spreadsheetId: string;
+    summary: string;
+  },
+) {
+  const revisionId = crypto.randomUUID();
+  await env.DB.prepare(
+    [
+      "INSERT INTO spreadsheet_revisions",
+      "(id, spreadsheet_id, revision_number, action, filename, r2_key, size_bytes, content_type, summary)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ].join(" "),
+  )
+    .bind(
+      revisionId,
+      input.spreadsheetId,
+      input.revisionNumber,
+      input.action,
+      input.filename,
+      input.r2Key,
+      input.sizeBytes,
+      input.contentType,
+      input.summary,
+    )
+    .run();
+
+  return env.DB.prepare(
+    [
+      "SELECT id, spreadsheet_id, revision_number, action, filename, r2_key, size_bytes, content_type, summary, created_at",
+      "FROM spreadsheet_revisions",
+      "WHERE id = ?",
+    ].join(" "),
+  )
+    .bind(revisionId)
+    .first<SpreadsheetRevisionRow>();
+}
+
 async function uploadSpreadsheet(request: Request, env: Env) {
   const formData = await request.formData();
   const file = formData.get("spreadsheet");
@@ -795,12 +889,15 @@ async function uploadSpreadsheet(request: Request, env: Env) {
   const category = cleanCategory(formData.get("category"));
   const preExtract = requestedPreExtract !== "false";
   const id = typeof requestedId === "string" && /^[a-f0-9-]{36}$/i.test(requestedId) ? requestedId : crypto.randomUUID();
+  const existingSpreadsheet = await getSpreadsheetRow(env, id);
+  const revisionNumber = await nextSpreadsheetRevisionNumber(env, id);
   const agentName = agentNameForSpreadsheet(id);
   const sandboxPath = `/workspace/spreadsheets/${id}/${safeFilename(file.name)}`;
-  const r2Key = r2KeyForSpreadsheet(id, file.name);
+  const r2Key = revisionR2KeyForSpreadsheet(id, revisionNumber, file.name);
   const sandbox = getSandbox(env.Sandbox, `sandbox-${id}`);
   const fileBuffer = await file.arrayBuffer();
   const stub = env.SheetsThink.get(env.SheetsThink.idFromName(agentName));
+  let revision: SpreadsheetRevisionRow | null = null;
 
   await env.DB.prepare(
     [
@@ -843,13 +940,27 @@ async function uploadSpreadsheet(request: Request, env: Env) {
       },
       customMetadata: {
         filename: file.name,
+        revisionNumber: String(revisionNumber),
         spreadsheetId: id,
       },
     });
 
+    revision = await recordSpreadsheetRevision(env, {
+      action: existingSpreadsheet ? "revision_upload" : "upload",
+      contentType: file.type || "application/octet-stream",
+      filename: file.name,
+      r2Key,
+      revisionNumber,
+      sizeBytes: file.size,
+      spreadsheetId: id,
+      summary: existingSpreadsheet
+        ? `Revision ${revisionNumber} uploaded as ${file.name}. Previous latest file was ${existingSpreadsheet.filename}.`
+        : `Initial upload of ${file.name}.`,
+    });
+
     await stub.fetch("https://agent.local/upload-trace", {
       body: JSON.stringify({
-        detail: { r2Key },
+        detail: { r2Key, revisionNumber },
         spanType: "upload",
         status: "done",
         title: "Stored file in R2",
@@ -880,6 +991,7 @@ async function uploadSpreadsheet(request: Request, env: Env) {
         contentType: file.type || "application/octet-stream",
         filename: file.name,
         r2Key,
+        revisionNumber,
         sandboxPath,
         sizeBytes: file.size,
         spreadsheetId: id,
@@ -974,11 +1086,119 @@ async function uploadSpreadsheet(request: Request, env: Env) {
         pre_extract: preExtract ? 1 : 0,
         size_bytes: file.size,
         agent_name: agentName,
+        revision,
         sandbox_path: sandboxPath,
       },
     },
     { status: 201 },
   );
+}
+
+async function uploadSpreadsheetRevision(request: Request, env: Env, spreadsheetId: string) {
+  const existingSpreadsheet = await getSpreadsheetRow(env, spreadsheetId);
+  if (!existingSpreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+
+  const formData = await request.formData();
+  const file = formData.get("spreadsheet");
+
+  if (!(file instanceof File)) {
+    return json({ error: "Upload a spreadsheet file with field name 'spreadsheet'." }, { status: 400 });
+  }
+
+  if (!isSpreadsheetFile(file)) {
+    return json({ error: "Supported files: .xlsx, .xls, .csv, .tsv, .ods, .xml" }, { status: 400 });
+  }
+
+  const requestedPreExtract = formData.get("preExtract");
+  const preExtract = requestedPreExtract !== "false";
+  const revisionNumber = await nextSpreadsheetRevisionNumber(env, spreadsheetId);
+  const sandboxPath = `/workspace/spreadsheets/${spreadsheetId}/${safeFilename(file.name)}`;
+  const r2Key = revisionR2KeyForSpreadsheet(spreadsheetId, revisionNumber, file.name);
+  const sandbox = getSandbox(env.Sandbox, `sandbox-${spreadsheetId}`);
+  const fileBuffer = await file.arrayBuffer();
+  const stub = env.SheetsThink.get(env.SheetsThink.idFromName(existingSpreadsheet.agent_name));
+  const contentType = file.type || "application/octet-stream";
+  let revision: SpreadsheetRevisionRow | null = null;
+  let shouldDestroySandbox = false;
+
+  try {
+    await env.SPREADSHEETS.put(r2Key, fileBuffer, {
+      httpMetadata: { contentType },
+      customMetadata: {
+        filename: file.name,
+        revisionNumber: String(revisionNumber),
+        spreadsheetId,
+      },
+    });
+
+    revision = await recordSpreadsheetRevision(env, {
+      action: "revision_upload",
+      contentType,
+      filename: file.name,
+      r2Key,
+      revisionNumber,
+      sizeBytes: file.size,
+      spreadsheetId,
+      summary: `Revision ${revisionNumber} uploaded as ${file.name}. Previous latest file was ${existingSpreadsheet.filename}.`,
+    });
+
+    await sandbox.mkdir(`/workspace/spreadsheets/${spreadsheetId}`, { recursive: true });
+    await sandbox.writeFile(sandboxPath, arrayBufferToBase64(fileBuffer), {
+      encoding: "base64",
+    });
+    shouldDestroySandbox = true;
+
+    const fileResponse = await stub.fetch("https://agent.local/spreadsheet-file", {
+      body: JSON.stringify({
+        contentType,
+        filename: file.name,
+        r2Key,
+        revisionNumber,
+        sandboxPath,
+        sizeBytes: file.size,
+        spreadsheetId,
+        preExtract,
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    if (!fileResponse.ok) throw new Error((await fileResponse.text()) || "Failed to persist spreadsheet file.");
+
+    await env.DB.prepare(
+      [
+        "UPDATE spreadsheets",
+        "SET filename = ?, content_type = ?, size_bytes = ?, r2_key = ?, pre_extract = ?, sandbox_path = ?, status = 'processing', error_message = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        "WHERE id = ?",
+      ].join(" "),
+    )
+      .bind(file.name, contentType, file.size, r2Key, preExtract ? 1 : 0, sandboxPath, spreadsheetId)
+      .run();
+
+    if (preExtract) {
+      const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
+      if (!spreadsheet) throw new Error("Failed to load spreadsheet for extraction workflow.");
+      await startExtractionWorkflow(env, spreadsheet);
+    } else {
+      await env.DB.prepare(
+        [
+          "UPDATE spreadsheets",
+          "SET status = 'ready', error_message = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+          "WHERE id = ?",
+        ].join(" "),
+      )
+        .bind(spreadsheetId)
+        .run();
+    }
+  } catch (error) {
+    throw error;
+  } finally {
+    if (shouldDestroySandbox) {
+      await destroyUploadSandbox(sandbox, stub);
+    }
+  }
+
+  const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
+  return json({ revision, spreadsheet }, { status: 201 });
 }
 
 async function sendAgentRequest(request: Request, env: Env) {
@@ -1435,9 +1655,10 @@ async function deleteSpreadsheet(env: Env, spreadsheetId: string) {
     throw new Error((await cleanupResponse.text()) || "Failed to clean up spreadsheet agent data.");
   }
 
-  if (spreadsheet.r2_key) {
-    await env.SPREADSHEETS.delete(spreadsheet.r2_key);
-  }
+  const revisionRows = await listSpreadsheetRevisionRows(env, spreadsheet.id);
+  const revisionKeys = new Set(revisionRows.map((revision) => revision.r2_key));
+  if (spreadsheet.r2_key) revisionKeys.add(spreadsheet.r2_key);
+  await Promise.all(Array.from(revisionKeys).map((r2Key) => env.SPREADSHEETS.delete(r2Key)));
 
   await env.DB.prepare("DELETE FROM agent_sheets WHERE spreadsheet_id = ?").bind(spreadsheet.id).run();
   await env.DB.prepare("DELETE FROM spreadsheets WHERE id = ?").bind(spreadsheet.id).run();
@@ -1626,6 +1847,7 @@ export class SheetsThink extends Think<Env> {
       preExtracted
         ? "For questions about the data, first call describe_spreadsheet_database, then query_spreadsheet_database. Use execute_python only when SQL is insufficient or the user asks for code/Python."
         : "For questions about the data, use execute_python first to inspect the raw spreadsheet file at SPREADSHEET_PATH. Do not assume pre-extracted SQL tables exist.",
+      "For questions about upload history, edits, versions, or revisions, call list_spreadsheet_revisions.",
       "Use robust CSV/TSV parsing: sniff delimiters, prefer pandas.read_csv(..., engine='python', on_bad_lines='skip', encoding='utf-8-sig') when using pandas, and fall back to csv.reader for ragged files. Use pandas.read_excel for XLSX/XLS, pandas.read_excel(..., engine='odf') for ODS, and pandas.read_xml or lxml/ElementTree for XML.",
       "When citing values, include the source_ref/source_row from the generated database where possible.",
       "Keep answers concise, concrete, and useful.",
@@ -1647,6 +1869,15 @@ export class SheetsThink extends Think<Env> {
           sql: z.string().min(1).describe("Read-only SQLite SELECT or WITH query."),
         }),
         execute: async ({ sql }) => this.queryAnalysisDatabase(sql),
+      }),
+      list_spreadsheet_revisions: tool({
+        description: "List upload and revision history for this spreadsheet, newest revision first.",
+        inputSchema: z.object({}),
+        execute: async () => {
+          const spreadsheetId = spreadsheetIdFromAgentName(this.name);
+          if (!spreadsheetId) throw new Error("This agent is not attached to a spreadsheet.");
+          return listSpreadsheetRevisionRows(this.env, spreadsheetId);
+        },
       }),
       execute_python: tool({
         description:
@@ -3386,6 +3617,15 @@ export default {
     const spreadsheetRetryExtractionMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/retry-extraction$/);
     if (spreadsheetRetryExtractionMatch && request.method === "POST") {
       return retrySpreadsheetExtraction(env, spreadsheetRetryExtractionMatch[1]);
+    }
+
+    const spreadsheetRevisionsMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/revisions$/);
+    if (spreadsheetRevisionsMatch && request.method === "GET") {
+      return listSpreadsheetRevisions(env, spreadsheetRevisionsMatch[1]);
+    }
+
+    if (spreadsheetRevisionsMatch && request.method === "POST") {
+      return uploadSpreadsheetRevision(request, env, spreadsheetRevisionsMatch[1]);
     }
 
     const spreadsheetDeleteMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)$/);
