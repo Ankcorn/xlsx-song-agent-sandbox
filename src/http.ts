@@ -135,6 +135,7 @@ type AgentInitializationPayload = {
     } | null;
     category: string;
     filename: string;
+    metadata?: Record<string, unknown> | null;
     spreadsheetId: string;
     tables: Array<{
       columns: string[];
@@ -159,6 +160,21 @@ type CodemodeExtraction = {
   description: string;
   filename: string;
   format: string;
+  metadata: {
+    category: string;
+    confidence_score: number;
+    caveats: string;
+    description: string;
+    dimensions: Record<string, unknown>;
+    domain: string;
+    extraction_notes: string;
+    geography: string;
+    measures: Record<string, unknown>;
+    source_summary: string;
+    time_period: string;
+    title: string;
+    units: string;
+  };
   tables: Array<{
     columns: string[];
     name: string;
@@ -508,6 +524,7 @@ function normalizeJsonValue(value: unknown): string | number | boolean | null {
 
 function normalizeCodemodeExtraction(value: unknown, filename: string): CodemodeExtraction {
   const input = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const metadataInput = input.metadata && typeof input.metadata === "object" ? (input.metadata as Record<string, unknown>) : {};
   const rawTables = Array.isArray(input.tables) ? input.tables : [];
   const tables = rawTables.map((rawTable, tableIndex) => {
     const table = rawTable && typeof rawTable === "object" ? (rawTable as Record<string, unknown>) : {};
@@ -549,13 +566,45 @@ function normalizeCodemodeExtraction(value: unknown, filename: string): Codemode
     };
   });
 
-  return {
-    description:
+  const description =
       typeof input.description === "string" && input.description.trim()
         ? input.description
-        : `${filename} was analyzed in codemode into ${tables.length} table${tables.length === 1 ? "" : "s"}.`,
+        : typeof metadataInput.description === "string" && metadataInput.description.trim()
+          ? metadataInput.description
+          : `${filename} was analyzed in codemode into ${tables.length} table${tables.length === 1 ? "" : "s"}.`;
+  const metadata = {
+    category: typeof metadataInput.category === "string" && metadataInput.category.trim() ? metadataInput.category : "Uncategorised",
+    caveats: typeof metadataInput.caveats === "string" ? metadataInput.caveats : "",
+    confidence_score:
+      typeof metadataInput.confidence_score === "number" && Number.isFinite(metadataInput.confidence_score)
+        ? Math.max(0, Math.min(100, Math.round(metadataInput.confidence_score)))
+        : 75,
+    description,
+    dimensions:
+      metadataInput.dimensions && typeof metadataInput.dimensions === "object"
+        ? (metadataInput.dimensions as Record<string, unknown>)
+        : {},
+    domain: typeof metadataInput.domain === "string" && metadataInput.domain.trim() ? metadataInput.domain : "general",
+    extraction_notes: typeof metadataInput.extraction_notes === "string" ? metadataInput.extraction_notes : "",
+    geography: typeof metadataInput.geography === "string" ? metadataInput.geography : "",
+    measures:
+      metadataInput.measures && typeof metadataInput.measures === "object"
+        ? (metadataInput.measures as Record<string, unknown>)
+        : {},
+    source_summary: typeof metadataInput.source_summary === "string" ? metadataInput.source_summary : "",
+    time_period: typeof metadataInput.time_period === "string" ? metadataInput.time_period : "",
+    title:
+      typeof metadataInput.title === "string" && metadataInput.title.trim()
+        ? metadataInput.title
+        : filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "),
+    units: typeof metadataInput.units === "string" ? metadataInput.units : "",
+  };
+
+  return {
+    description,
     filename: typeof input.filename === "string" ? input.filename : filename,
     format: typeof input.format === "string" ? input.format : filename.split(".").pop()?.toLowerCase() ?? "unknown",
+    metadata,
     tables,
   };
 }
@@ -1478,6 +1527,7 @@ async function exportSpreadsheetAnalysis(env: Env, spreadsheet: SpreadsheetRow) 
   }
   return response.json() as Promise<{
     analysis: AgentInitializationPayload["sheets"][number]["analysis"];
+    metadata?: AgentInitializationPayload["sheets"][number]["metadata"];
     tables: Array<{
       columns: string[];
       rows: Record<string, unknown>[];
@@ -1545,6 +1595,7 @@ async function createLibraryAgent(request: Request, env: Env) {
         analysis: exported.analysis,
         category: spreadsheet.category || "Uncategorised",
         filename: spreadsheet.filename,
+        metadata: exported.metadata ?? null,
         spreadsheetId: spreadsheet.id,
         tables: exported.tables,
       });
@@ -2338,6 +2389,25 @@ export class SheetsThink extends Think<Env> {
       )
     `;
     this.sql`
+      CREATE TABLE IF NOT EXISTS document_metadata (
+        spreadsheet_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        category TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        geography TEXT,
+        time_period TEXT,
+        units TEXT,
+        measures_json TEXT NOT NULL,
+        dimensions_json TEXT NOT NULL,
+        caveats TEXT,
+        source_summary TEXT,
+        extraction_notes TEXT,
+        confidence_score INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `;
+    this.sql`
       CREATE TABLE IF NOT EXISTS document_tables (
         spreadsheet_id TEXT NOT NULL,
         table_name TEXT NOT NULL,
@@ -2403,7 +2473,8 @@ export class SheetsThink extends Think<Env> {
       status: "done",
       title: "Document shape inspected",
     });
-    const code = await this.generateCodemodeExtractionCode(filename, profile);
+    const design = await this.designCodemodeExtraction(filename, profile);
+    const code = await this.generateCodemodeExtractionCode(filename, profile, design);
     const extractionStartedAt = Date.now();
     this.recordTrace({
       detail: traceDetail("Running the generated Python extraction script in the sandbox.", code),
@@ -2442,9 +2513,13 @@ export class SheetsThink extends Think<Env> {
       title: "Normalizing extraction output",
     });
     const extraction = normalizeCodemodeExtraction(parseJsonText(extractionResult.stdout), filename);
+    const review = await this.reviewCodemodeExtraction(filename, profile, design, extraction);
+    extraction.metadata.confidence_score = review.score;
+    extraction.metadata.extraction_notes = [extraction.metadata.extraction_notes, review.notes].filter(Boolean).join("\n\n");
     this.recordTrace({
       detail: traceDetail("The extraction JSON is valid and has been normalized into table definitions.", {
         description: extraction.description,
+        metadata: extraction.metadata,
         tables: extractionTableSummary(extraction),
       }),
       durationMs: Date.now() - parseStartedAt,
@@ -2474,8 +2549,8 @@ export class SheetsThink extends Think<Env> {
         ${spreadsheetId},
         ${extraction.description},
         ${JSON.stringify(this.extractionSummary(extraction))},
-        ${JSON.stringify({ mode: "codemode", profile })},
-        ${100},
+        ${JSON.stringify({ metadata: extraction.metadata, mode: "codemode", profile })},
+        ${extraction.metadata.confidence_score},
         ${new Date().toISOString()}
       )
       ON CONFLICT(spreadsheet_id) DO UPDATE SET
@@ -2488,6 +2563,7 @@ export class SheetsThink extends Think<Env> {
     this.recordTrace({
       detail: traceDetail("The agent SQLite database now contains the extracted document data.", {
         description: extraction.description,
+        metadata: extraction.metadata,
         tables: extractionTableSummary(extraction),
       }),
       durationMs: Date.now() - storeStartedAt,
@@ -2496,7 +2572,7 @@ export class SheetsThink extends Think<Env> {
       title: "SQLite tables ready",
     });
 
-    return { description: extraction.description, mode: "codemode", score: 100, tables: extraction.tables.length };
+    return { description: extraction.description, mode: "codemode", score: extraction.metadata.confidence_score, tables: extraction.tables.length };
   }
 
   private storeCodemodeExtraction(spreadsheetId: string, extraction: CodemodeExtraction) {
@@ -2510,10 +2586,48 @@ export class SheetsThink extends Think<Env> {
 
     this.sql`DELETE FROM document_tables WHERE spreadsheet_id = ${spreadsheetId}`;
     this.sql`DELETE FROM document_analysis WHERE spreadsheet_id = ${spreadsheetId}`;
+    this.sql`DELETE FROM document_metadata WHERE spreadsheet_id = ${spreadsheetId}`;
+
+    this.sql`
+      INSERT INTO document_metadata (
+        spreadsheet_id,
+        title,
+        description,
+        category,
+        domain,
+        geography,
+        time_period,
+        units,
+        measures_json,
+        dimensions_json,
+        caveats,
+        source_summary,
+        extraction_notes,
+        confidence_score,
+        updated_at
+      )
+      VALUES (
+        ${spreadsheetId},
+        ${extraction.metadata.title},
+        ${extraction.metadata.description},
+        ${extraction.metadata.category},
+        ${extraction.metadata.domain},
+        ${extraction.metadata.geography},
+        ${extraction.metadata.time_period},
+        ${extraction.metadata.units},
+        ${JSON.stringify(extraction.metadata.measures)},
+        ${JSON.stringify(extraction.metadata.dimensions)},
+        ${extraction.metadata.caveats},
+        ${extraction.metadata.source_summary},
+        ${extraction.metadata.extraction_notes},
+        ${extraction.metadata.confidence_score},
+        ${new Date().toISOString()}
+      )
+    `;
 
     extraction.tables.forEach((table, tableIndex) => {
       const tableName = this.safeSqlIdentifier(`doc_${tableIndex + 1}_${table.name}`);
-      const uniqueColumns = this.uniqueSqlColumns(table.columns);
+      const uniqueColumns = this.uniqueSqlColumns(table.columns.filter((column) => !["source_row", "source_ref"].includes(column.toLowerCase())));
       const columnDefs = uniqueColumns.map((column) => `${this.quoteIdentifier(column)} TEXT`).join(", ");
       const createSql = [
         `CREATE TABLE ${this.quoteIdentifier(tableName)} (`,
@@ -2541,17 +2655,88 @@ export class SheetsThink extends Think<Env> {
     });
   }
 
-  private async generateCodemodeExtractionCode(filename: string, profile: unknown) {
+  private async designCodemodeExtraction(filename: string, profile: unknown) {
+    const prompt = [
+      "You are codemode's data modeling planner.",
+      "Design a semantic SQLite extraction model for this uploaded document.",
+      "Return only JSON, no markdown.",
+      "Do not mirror the spreadsheet mechanically unless the document is already a clean domain table.",
+      "Prefer proper domain tables with clear grain, useful names, typed columns, and provenance columns.",
+      "Every fact/observation table must include source_row and source_ref.",
+      "Always include a metadata object with title, description, category, domain, geography, time_period, units, measures, dimensions, caveats, source_summary, extraction_notes, confidence_score.",
+      "The JSON shape must be:",
+      '{"metadata": {"title": string, "description": string, "category": string, "domain": string, "geography": string, "time_period": string, "units": string, "measures": object, "dimensions": object, "caveats": string, "source_summary": string, "extraction_notes": string, "confidence_score": number}, "tables": [{"name": string, "purpose": string, "grain": string, "columns": [{"name": string, "meaning": string}], "source_strategy": string}]}',
+      `Filename: ${filename}`,
+      "Inspection profile:",
+      JSON.stringify(profile, null, 2),
+    ].join("\n\n");
+
+    const entries = configuredModelEntries(this.env);
+    let lastError: unknown;
+
+    for (const entry of entries) {
+      const label = `${entry.provider}:${entry.model}`;
+      const startedAt = Date.now();
+      try {
+        this.recordTrace({
+          detail: traceDetail("Asking the model to design semantic tables and document metadata before code is written.", {
+            model: label,
+            profile: profileSummary(profile),
+          }),
+          spanType: "ingestion",
+          status: "running",
+          title: "Designing semantic schema",
+        });
+        const model =
+          entry.provider.toLowerCase() === "workers-ai"
+            ? createWorkersAI({ binding: this.env.AI })(entry.model)
+            : this.getGatewayModel([entry]);
+        const result = await generateText({
+          model,
+          prompt,
+          temperature: 0,
+        });
+        const design = parseJsonText(result.text);
+        this.recordTrace({
+          detail: traceDetail("The model proposed domain-specific tables and metadata for the extraction.", design),
+          durationMs: Date.now() - startedAt,
+          spanType: "ingestion",
+          status: "done",
+          title: "Semantic schema designed",
+        });
+        return design;
+      } catch (error) {
+        lastError = error;
+        this.recordTrace({
+          detail: traceDetail(
+            "This model failed to design a semantic schema. The fallback chain will continue if another model is configured.",
+            error instanceof Error ? { message: error.message, model: label } : { error, model: label },
+          ),
+          durationMs: Date.now() - startedAt,
+          spanType: "ingestion",
+          status: "error",
+          title: "Semantic schema design failed",
+        });
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("Failed to design codemode extraction.");
+  }
+
+  private async generateCodemodeExtractionCode(filename: string, profile: unknown, design: unknown) {
     const prompt = [
       "You are in codemode. Generate a complete Python script that reads the uploaded spreadsheet at SPREADSHEET_PATH and prints one JSON object to stdout.",
       "Do not explain the code. Return only Python code, with no markdown fences.",
       "The variable SPREADSHEET_PATH is already defined as the absolute sandbox path. You must read from SPREADSHEET_PATH, not from the filename and not from the current working directory.",
       "Start by assigning path = pathlib.Path(SPREADSHEET_PATH) or Path(SPREADSHEET_PATH), and use that path variable for every file read.",
-      "The script must dynamically extract the spreadsheet into this exact JSON shape:",
-      '{"description": string, "filename": string, "format": string, "tables": [{"name": string, "columns": string[], "rows": [{"source_row": number, "source_ref": string, "cells": object}]}]}',
+      "The script must implement the semantic extraction design below, not simply mirror spreadsheet columns unless the design explicitly says to.",
+      "The script must print this exact JSON shape:",
+      '{"description": string, "filename": string, "format": string, "metadata": {"title": string, "description": string, "category": string, "domain": string, "geography": string, "time_period": string, "units": string, "measures": object, "dimensions": object, "caveats": string, "source_summary": string, "extraction_notes": string, "confidence_score": number}, "tables": [{"name": string, "columns": string[], "rows": [{"source_row": number, "source_ref": string, "cells": object}]}]}',
       "Rules:",
-      "- Preserve all meaningful spreadsheet/XML/CSV data.",
+      "- Create domain-specific tables with proper names, grain, and columns based on the semantic design.",
+      "- Preserve all meaningful spreadsheet/XML/CSV data, either in semantic tables or an audit/source table if needed.",
       "- Include source_row and source_ref for every extracted row so answers can point back to the original document.",
+      "- Include a metadata table worth of content in the metadata object: category, domain, measures, dimensions, units, geography, time period, caveats, source summary, and extraction notes.",
       "- Use pandas for xlsx/xls/ods when useful. Use ElementTree or lxml for XML.",
       "- For CSV/TSV, expect messy real-world files: metadata rows, inconsistent column counts, BOMs, quoted delimiters, blank lines, and semicolon/pipe/tab/comma delimiters.",
       "- For CSV/TSV, sniff the delimiter with csv.Sniffer over a large sample when possible. If using pandas.read_csv, prefer engine='python', dtype=object, keep_default_na=False, encoding='utf-8-sig', and on_bad_lines='skip'.",
@@ -2559,10 +2744,11 @@ export class SheetsThink extends Think<Env> {
       "- Normalize NaN, Infinity, pandas.NA, timestamps, decimals, and numpy values into valid JSON values.",
       "- Print with json.dumps(..., ensure_ascii=False, allow_nan=False).",
       "- Never print Python dict reprs, comments, logs, warnings, or NaN tokens.",
-      "- If the first row appears to be headers, use it as columns. Otherwise create column_1, column_2, etc.",
       `Filename: ${filename}`,
       "Inspection profile:",
       JSON.stringify(profile, null, 2),
+      "Semantic extraction design:",
+      JSON.stringify(design, null, 2),
     ].join("\n\n");
 
     const entries = configuredModelEntries(this.env);
@@ -2620,11 +2806,78 @@ export class SheetsThink extends Think<Env> {
     throw lastError instanceof Error ? lastError : new Error("Failed to generate extraction code.");
   }
 
+  private async reviewCodemodeExtraction(filename: string, profile: unknown, design: unknown, extraction: CodemodeExtraction) {
+    const prompt = [
+      "You are codemode's extraction reviewer.",
+      "Review whether the generated SQLite extraction is domain-specific, complete, well-metadataed, and source-referenceable.",
+      "Return only JSON with keys: score, notes, issues.",
+      "score must be an integer from 0 to 100.",
+      "Reward semantic tables with clear grain and provenance. Penalize spreadsheet mirroring when better domain tables were possible.",
+      `Filename: ${filename}`,
+      "Inspection profile:",
+      JSON.stringify(profileSummary(profile), null, 2),
+      "Semantic design:",
+      JSON.stringify(design, null, 2),
+      "Extraction summary:",
+      JSON.stringify(this.extractionSummary(extraction), null, 2),
+    ].join("\n\n");
+
+    const entries = configuredModelEntries(this.env);
+    let lastError: unknown;
+
+    for (const entry of entries) {
+      const label = `${entry.provider}:${entry.model}`;
+      const startedAt = Date.now();
+      try {
+        this.recordTrace({
+          detail: traceDetail("Asking the model to score the semantic extraction and metadata quality.", { model: label }),
+          spanType: "ingestion",
+          status: "running",
+          title: "Reviewing extraction quality",
+        });
+        const model =
+          entry.provider.toLowerCase() === "workers-ai"
+            ? createWorkersAI({ binding: this.env.AI })(entry.model)
+            : this.getGatewayModel([entry]);
+        const result = await generateText({ model, prompt, temperature: 0 });
+        const parsed = parseJsonText(result.text) as { issues?: unknown; notes?: unknown; score?: unknown };
+        const score = typeof parsed.score === "number" && Number.isFinite(parsed.score) ? Math.max(0, Math.min(100, Math.round(parsed.score))) : extraction.metadata.confidence_score;
+        const notes = typeof parsed.notes === "string" ? parsed.notes : JSON.stringify(parsed);
+        this.recordTrace({
+          detail: traceDetail("The model reviewed the generated domain tables and metadata.", { issues: parsed.issues, notes, score }),
+          durationMs: Date.now() - startedAt,
+          spanType: "ingestion",
+          status: "done",
+          title: "Extraction quality reviewed",
+        });
+        return { notes, score };
+      } catch (error) {
+        lastError = error;
+        this.recordTrace({
+          detail: traceDetail(
+            "This model failed to review the extraction. The fallback chain will continue if another model is configured.",
+            error instanceof Error ? { message: error.message, model: label } : { error, model: label },
+          ),
+          durationMs: Date.now() - startedAt,
+          spanType: "ingestion",
+          status: "error",
+          title: "Extraction quality review failed",
+        });
+      }
+    }
+
+    return {
+      notes: lastError instanceof Error ? `Review failed: ${lastError.message}` : "Review failed.",
+      score: extraction.metadata.confidence_score,
+    };
+  }
+
   private extractionSummary(extraction: CodemodeExtraction) {
     return {
       description: extraction.description,
       filename: extraction.filename,
       format: extraction.format,
+      metadata: extraction.metadata,
       tables: extraction.tables.map((table) => ({
         columns: table.columns,
         name: table.name,
@@ -2641,12 +2894,17 @@ export class SheetsThink extends Think<Env> {
       FROM document_analysis
       LIMIT 1
     `;
+    const metadata = this.sql`
+      SELECT *
+      FROM document_metadata
+      LIMIT 1
+    `;
     const tables = this.sql`
       SELECT table_name, source_name, columns_json, row_count
       FROM document_tables
       ORDER BY table_name
     `;
-    return { analysis, tables };
+    return { analysis, metadata, tables };
   }
 
   private listAnalysisTables() {
@@ -2654,6 +2912,11 @@ export class SheetsThink extends Think<Env> {
     const analysis = this.sql`
       SELECT spreadsheet_id, description, extraction_score, updated_at
       FROM document_analysis
+      LIMIT 1
+    `;
+    const metadata = this.sql`
+      SELECT *
+      FROM document_metadata
       LIMIT 1
     `;
     const tables = this.sql<{
@@ -2670,7 +2933,7 @@ export class SheetsThink extends Think<Env> {
       columns: parseStringArray(table.columns_json),
     }));
 
-    return { analysis: analysis[0] ?? null, tables };
+    return { analysis: analysis[0] ?? null, metadata: metadata[0] ?? null, tables };
   }
 
   private getAnalysisTable(tableName: string) {
@@ -2702,6 +2965,7 @@ export class SheetsThink extends Think<Env> {
     const listed = this.listAnalysisTables();
     return {
       analysis: listed.analysis,
+      metadata: listed.metadata,
       tables: listed.tables.map((table) => ({
         columns: ["source_row", "source_ref", ...table.columns],
         rows: [...this.ctx.storage.sql.exec(`SELECT * FROM ${this.quoteIdentifier(table.table_name)}`)],
@@ -3185,9 +3449,17 @@ export class AgentThink extends Think<Env> {
         category TEXT NOT NULL,
         description TEXT,
         extraction_score INTEGER,
+        metadata_json TEXT,
         updated_at TEXT NOT NULL
       )
     `;
+    try {
+      this.ctx.storage.sql.exec("ALTER TABLE agent_sources ADD COLUMN metadata_json TEXT");
+    } catch (error) {
+      if (!(error instanceof Error ? error.message : String(error)).toLowerCase().includes("duplicate column")) {
+        throw error;
+      }
+    }
     this.sql`
       CREATE TABLE IF NOT EXISTS agent_table_mappings (
         table_name TEXT PRIMARY KEY,
@@ -3234,13 +3506,14 @@ export class AgentThink extends Think<Env> {
     `;
     input.sheets.forEach((sheet, sheetIndex) => {
       this.sql`
-        INSERT INTO agent_sources (spreadsheet_id, filename, category, description, extraction_score, updated_at)
+        INSERT INTO agent_sources (spreadsheet_id, filename, category, description, extraction_score, metadata_json, updated_at)
         VALUES (
           ${sheet.spreadsheetId},
           ${sheet.filename},
           ${sheet.category},
           ${sheet.analysis?.description ?? null},
           ${sheet.analysis?.extraction_score ?? null},
+          ${JSON.stringify(sheet.metadata ?? null)},
           ${now}
         )
       `;
