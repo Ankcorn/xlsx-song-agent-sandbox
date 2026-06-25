@@ -345,7 +345,9 @@ h2 {
 .chat-page {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  min-height: calc(100vh - 64px);
+  height: calc(100vh - 64px);
+  min-height: 0;
+  overflow: hidden;
 }
 
 .chat-header {
@@ -398,7 +400,9 @@ h2 {
   display: grid;
   gap: 28px;
   grid-template-columns: minmax(0, 1fr) 340px;
+  height: 100%;
   min-height: 0;
+  overflow: hidden;
   padding: 28px;
   transition: grid-template-columns 180ms ease;
 }
@@ -628,6 +632,11 @@ h2 {
   min-width: 0;
   overflow: hidden;
   padding: 22px;
+}
+
+.trace-content {
+  min-height: 0;
+  overflow: auto;
 }
 
 .trace-panel header {
