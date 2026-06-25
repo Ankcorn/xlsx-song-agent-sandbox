@@ -38,7 +38,7 @@ async function runPython(env: Env, code = DEFAULT_SCRIPT) {
 
 export class HackathonAgent extends Think<Env> {
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })("@cf/zai-org/glm-4.7-flash");
+    return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.7-code");
   }
 
   getSystemPrompt() {
