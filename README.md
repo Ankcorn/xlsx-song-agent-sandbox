@@ -33,12 +33,12 @@ Expected shape:
 ## Spreadsheet flow
 
 - `/` lists uploaded spreadsheets from D1.
-- `/upload` uploads `.xlsx`, `.xls`, `.csv`, or `.tsv` files and creates a D1 spreadsheet record.
+- `/upload` uploads `.xlsx`, `.xls`, `.csv`, `.tsv`, `.ods`, or `.xml` files and creates a D1 spreadsheet record.
 - `/spreadsheets/:spreadsheetId` opens the retained chat agent for that spreadsheet.
 
 Each spreadsheet record stores `id`, `filename`, `content_type`, `size_bytes`, `agent_name`, `sandbox_path`, and `uploaded_at`. Uploads are written to `/workspace/spreadsheets/<id>/<filename>` inside that spreadsheet's Sandbox instance. The UI passes `agent_name` to `useAgent`, which gives each spreadsheet its own durable Think agent.
 
-The agent's `execute_python` tool injects `SPREADSHEET_PATH` and `SPREADSHEET_FILENAME` into Python before running model-generated code, so chat turns can use pandas/openpyxl/csv code to answer questions about the uploaded data.
+The agent's `execute_python` tool injects `SPREADSHEET_PATH` and `SPREADSHEET_FILENAME` into Python before running model-generated code, so chat turns can use pandas/openpyxl/odfpy/lxml/csv code to answer questions about the uploaded data.
 
 ## D1
 
@@ -62,6 +62,6 @@ npx wrangler d1 migrations apply xlsx-song-spreadsheets --remote
 - `src/worker.ts` exposes `/api/spreadsheets` list/upload endpoints and `/api/spreadsheets/:id`.
 - Upload writes spreadsheet files to disk in Cloudflare Sandbox and stores the path in D1.
 - The agent exposes an `execute_python` tool backed by `@cloudflare/sandbox`.
-- `Dockerfile` uses `docker.io/cloudflare/sandbox:0.12.1-python`.
+- `Dockerfile` uses `docker.io/cloudflare/sandbox:0.12.1-python` and installs `openpyxl`, `odfpy`, and `lxml`.
 - `wrangler.jsonc` binds Workers AI, D1, the agent Durable Object, the Sandbox Durable Object, the container, and Vite-built static assets.
 - `src/App.tsx` provides TanStack Router pages for list, upload, and per-spreadsheet chat.

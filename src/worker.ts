@@ -95,7 +95,9 @@ function isSpreadsheetFile(file: File) {
     name.endsWith(".xlsx") ||
     name.endsWith(".xls") ||
     name.endsWith(".csv") ||
-    name.endsWith(".tsv")
+    name.endsWith(".tsv") ||
+    name.endsWith(".ods") ||
+    name.endsWith(".xml")
   );
 }
 
@@ -140,7 +142,7 @@ async function uploadSpreadsheet(request: Request, env: Env) {
   }
 
   if (!isSpreadsheetFile(file)) {
-    return json({ error: "Supported files: .xlsx, .xls, .csv, .tsv" }, { status: 400 });
+    return json({ error: "Supported files: .xlsx, .xls, .csv, .tsv, .ods, .xml" }, { status: 400 });
   }
 
   const id = crypto.randomUUID();
@@ -189,7 +191,7 @@ export class HackathonAgent extends Think<Env> {
       "You are scoped to one uploaded spreadsheet when your agent name starts with spreadsheet-.",
       "The uploaded spreadsheet is stored on disk in that spreadsheet's Cloudflare Sandbox.",
       "When the user asks about the data, write Python for execute_python. The tool provides SPREADSHEET_PATH and SPREADSHEET_FILENAME.",
-      "Use pandas for CSV/TSV. For XLSX/XLS, try pandas.read_excel first.",
+      "Use pandas.read_csv for CSV, pandas.read_csv(..., sep='\\t') for TSV, pandas.read_excel for XLSX/XLS, pandas.read_excel(..., engine='odf') for ODS, and pandas.read_xml or lxml/ElementTree for XML.",
       "Keep answers concise, concrete, and useful.",
     ].join("\n");
   }

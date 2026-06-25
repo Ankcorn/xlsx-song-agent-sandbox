@@ -182,9 +182,9 @@ function UploadPage() {
       <form className="upload-form" onSubmit={submitUpload}>
         <label className="file-drop">
           <Upload size={28} />
-          <span>{file ? file.name : "Choose .xlsx, .xls, .csv, or .tsv"}</span>
+          <span>{file ? file.name : "Choose .xlsx, .xls, .csv, .tsv, .ods, or .xml"}</span>
           <input
-            accept=".xlsx,.xls,.csv,.tsv"
+            accept=".xlsx,.xls,.csv,.tsv,.ods,.xml"
             type="file"
             onChange={(event) => setFile(event.target.files?.[0] ?? null)}
           />
