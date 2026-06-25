@@ -745,38 +745,52 @@ function ChatSurface({
       </header>
 
       <div className={`chat-main ${isTraceCollapsed ? "trace-collapsed" : ""}`}>
-        {activeView === "chat" ? (
-          <div className="messages">
-            {visibleMessages.length === 0 ? (
-              <div className="empty-state">
-                <FileSpreadsheet size={28} />
-                <p>
-                  {spreadsheet.pre_extract === 0
-                    ? "This spreadsheet is available as a raw file in the sandbox."
-                    : "This spreadsheet has a pre-extracted SQLite database."}
-                </p>
-              </div>
-            ) : (
-              visibleMessages.map((message) => (
-                <article className={`message ${message.role}`} key={message.id}>
-                  <span>{message.role}</span>
-                  <p>{textFromParts(message.parts)}</p>
-                </article>
-              ))
-            )}
-          </div>
-        ) : activeView === "sqlite" ? (
-          <SQLiteViewer
-            analysisTables={analysisTables}
-            error={viewerError}
-            isLoading={isViewerLoading}
-            selectedTable={selectedTable}
-            setSelectedTable={setSelectedTable}
-            tableData={tableData}
-          />
-        ) : (
-          <RawDocumentViewer error={viewerError} isLoading={isViewerLoading} rawPreview={rawPreview} />
-        )}
+        <div className="chat-workspace">
+          {activeView === "chat" ? (
+            <div className="messages">
+              {visibleMessages.length === 0 ? (
+                <div className="empty-state">
+                  <FileSpreadsheet size={28} />
+                  <p>
+                    {spreadsheet.pre_extract === 0
+                      ? "This spreadsheet is available as a raw file in the sandbox."
+                      : "This spreadsheet has a pre-extracted SQLite database."}
+                  </p>
+                </div>
+              ) : (
+                visibleMessages.map((message) => (
+                  <article className={`message ${message.role}`} key={message.id}>
+                    <span>{message.role}</span>
+                    <p>{textFromParts(message.parts)}</p>
+                  </article>
+                ))
+              )}
+            </div>
+          ) : activeView === "sqlite" ? (
+            <SQLiteViewer
+              analysisTables={analysisTables}
+              error={viewerError}
+              isLoading={isViewerLoading}
+              selectedTable={selectedTable}
+              setSelectedTable={setSelectedTable}
+              tableData={tableData}
+            />
+          ) : (
+            <RawDocumentViewer error={viewerError} isLoading={isViewerLoading} rawPreview={rawPreview} />
+          )}
+
+          <form className="composer" onSubmit={submitMessage}>
+            <input
+              aria-label="Message"
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder="Ask this spreadsheet agent..."
+            />
+            <button className="icon-button" type="submit" disabled={isBusy || !input.trim()}>
+              {isBusy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
+            </button>
+          </form>
+        </div>
 
         <aside className={`trace-panel ${isTraceCollapsed ? "is-collapsed" : ""}`}>
           <header>
@@ -825,18 +839,6 @@ function ChatSurface({
           </div>
         </aside>
       </div>
-
-      <form className="composer" onSubmit={submitMessage}>
-        <input
-          aria-label="Message"
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          placeholder="Ask this spreadsheet agent..."
-        />
-        <button className="icon-button" type="submit" disabled={isBusy || !input.trim()}>
-          {isBusy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
-        </button>
-      </form>
     </section>
   );
 }
