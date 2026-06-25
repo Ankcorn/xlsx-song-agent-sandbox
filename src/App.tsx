@@ -10,7 +10,19 @@ import {
   useNavigate,
   useParams,
 } from "@tanstack/react-router";
-import { ArrowLeft, FileSpreadsheet, Loader2, PanelRightClose, PanelRightOpen, Plus, Send, Upload } from "lucide-react";
+import {
+  ArrowLeft,
+  Database,
+  FileSpreadsheet,
+  FileText,
+  Loader2,
+  PanelRightClose,
+  PanelRightOpen,
+  Plus,
+  Send,
+  Table2,
+  Upload,
+} from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -56,6 +68,48 @@ type AgentTraceMessage = {
   trace: AgentTrace;
 };
 
+type AnalysisTableSummary = {
+  table_name: string;
+  source_name: string;
+  columns_json: string;
+  row_count: number;
+  columns: string[];
+};
+
+type AnalysisTablesResponse = {
+  analysis: {
+    spreadsheet_id: string;
+    description: string;
+    extraction_score: number;
+    updated_at: string;
+  } | null;
+  tables: AnalysisTableSummary[];
+};
+
+type AnalysisTableResponse = {
+  table: AnalysisTableSummary | null;
+  columns: string[];
+  rows: Record<string, unknown>[];
+};
+
+type RawPreviewSheet = {
+  name: string;
+  columns: number;
+  rows: unknown[][];
+};
+
+type RawPreviewResponse = {
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  preview: {
+    format: string;
+    sheets: RawPreviewSheet[];
+  };
+};
+
+type AgentView = "chat" | "sqlite" | "raw";
+
 function textFromParts(parts: Array<{ type: string; text?: string }>) {
   return parts
     .filter((part) => part.type === "text")
@@ -93,6 +147,12 @@ function isAgentTraceMessage(value: unknown): value is AgentTraceMessage {
 
 function extractionLabel(spreadsheet: Spreadsheet) {
   return spreadsheet.pre_extract === 0 ? "Just uploaded" : "Pre-extracted";
+}
+
+function cellText(value: unknown) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -430,6 +490,13 @@ function ChatSurface({
   const { messages, sendMessage, status } = useAgentChat({ agent });
   const isBusy = status === "submitted" || status === "streaming";
   const [isTraceCollapsed, setIsTraceCollapsed] = useState(false);
+  const [activeView, setActiveView] = useState<AgentView>("chat");
+  const [analysisTables, setAnalysisTables] = useState<AnalysisTablesResponse | null>(null);
+  const [selectedTable, setSelectedTable] = useState<string | null>(null);
+  const [tableData, setTableData] = useState<AnalysisTableResponse | null>(null);
+  const [rawPreview, setRawPreview] = useState<RawPreviewResponse | null>(null);
+  const [viewerError, setViewerError] = useState<string | null>(null);
+  const [isViewerLoading, setIsViewerLoading] = useState(false);
 
   const visibleMessages = useMemo(
     () => messages.filter((message) => textFromParts(message.parts).trim().length > 0),
@@ -451,6 +518,77 @@ function ChatSurface({
       isMounted = false;
     };
   }, [spreadsheet.id]);
+
+  useEffect(() => {
+    if (activeView !== "sqlite" || analysisTables) return;
+
+    let isMounted = true;
+    setIsViewerLoading(true);
+    setViewerError(null);
+
+    fetchJson<AnalysisTablesResponse>(`/api/spreadsheets/${spreadsheet.id}/tables`)
+      .then((data) => {
+        if (!isMounted) return;
+        setAnalysisTables(data);
+        setSelectedTable(data.tables[0]?.table_name ?? null);
+      })
+      .catch((caught: Error) => {
+        if (isMounted) setViewerError(caught.message);
+      })
+      .finally(() => {
+        if (isMounted) setIsViewerLoading(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [activeView, analysisTables, spreadsheet.id]);
+
+  useEffect(() => {
+    if (activeView !== "sqlite" || !selectedTable) return;
+
+    let isMounted = true;
+    setIsViewerLoading(true);
+    setViewerError(null);
+
+    fetchJson<AnalysisTableResponse>(`/api/spreadsheets/${spreadsheet.id}/tables/${encodeURIComponent(selectedTable)}`)
+      .then((data) => {
+        if (isMounted) setTableData(data);
+      })
+      .catch((caught: Error) => {
+        if (isMounted) setViewerError(caught.message);
+      })
+      .finally(() => {
+        if (isMounted) setIsViewerLoading(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [activeView, selectedTable, spreadsheet.id]);
+
+  useEffect(() => {
+    if (activeView !== "raw" || rawPreview) return;
+
+    let isMounted = true;
+    setIsViewerLoading(true);
+    setViewerError(null);
+
+    fetchJson<RawPreviewResponse>(`/api/spreadsheets/${spreadsheet.id}/raw-preview`)
+      .then((data) => {
+        if (isMounted) setRawPreview(data);
+      })
+      .catch((caught: Error) => {
+        if (isMounted) setViewerError(caught.message);
+      })
+      .finally(() => {
+        if (isMounted) setIsViewerLoading(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [activeView, rawPreview, spreadsheet.id]);
 
   function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -474,28 +612,55 @@ function ChatSurface({
             {formatBytes(spreadsheet.size_bytes)} · {spreadsheet.content_type || "spreadsheet"} · {extractionLabel(spreadsheet)}
           </p>
         </div>
+        <nav className="view-tabs" aria-label="Spreadsheet agent views">
+          <button className={activeView === "chat" ? "active" : ""} type="button" onClick={() => setActiveView("chat")}>
+            <FileSpreadsheet size={16} />
+            <span>Chat</span>
+          </button>
+          <button className={activeView === "sqlite" ? "active" : ""} type="button" onClick={() => setActiveView("sqlite")}>
+            <Database size={16} />
+            <span>SQLite</span>
+          </button>
+          <button className={activeView === "raw" ? "active" : ""} type="button" onClick={() => setActiveView("raw")}>
+            <FileText size={16} />
+            <span>Raw</span>
+          </button>
+        </nav>
       </header>
 
       <div className={`chat-main ${isTraceCollapsed ? "trace-collapsed" : ""}`}>
-        <div className="messages">
-          {visibleMessages.length === 0 ? (
-            <div className="empty-state">
-              <FileSpreadsheet size={28} />
-              <p>
-                {spreadsheet.pre_extract === 0
-                  ? "This spreadsheet is available as a raw file in the sandbox."
-                  : "This spreadsheet has a pre-extracted SQLite database."}
-              </p>
-            </div>
-          ) : (
-            visibleMessages.map((message) => (
-              <article className={`message ${message.role}`} key={message.id}>
-                <span>{message.role}</span>
-                <p>{textFromParts(message.parts)}</p>
-              </article>
-            ))
-          )}
-        </div>
+        {activeView === "chat" ? (
+          <div className="messages">
+            {visibleMessages.length === 0 ? (
+              <div className="empty-state">
+                <FileSpreadsheet size={28} />
+                <p>
+                  {spreadsheet.pre_extract === 0
+                    ? "This spreadsheet is available as a raw file in the sandbox."
+                    : "This spreadsheet has a pre-extracted SQLite database."}
+                </p>
+              </div>
+            ) : (
+              visibleMessages.map((message) => (
+                <article className={`message ${message.role}`} key={message.id}>
+                  <span>{message.role}</span>
+                  <p>{textFromParts(message.parts)}</p>
+                </article>
+              ))
+            )}
+          </div>
+        ) : activeView === "sqlite" ? (
+          <SQLiteViewer
+            analysisTables={analysisTables}
+            error={viewerError}
+            isLoading={isViewerLoading}
+            selectedTable={selectedTable}
+            setSelectedTable={setSelectedTable}
+            tableData={tableData}
+          />
+        ) : (
+          <RawDocumentViewer error={viewerError} isLoading={isViewerLoading} rawPreview={rawPreview} />
+        )}
 
         <aside className={`trace-panel ${isTraceCollapsed ? "is-collapsed" : ""}`}>
           <header>
@@ -557,6 +722,171 @@ function ChatSurface({
         </button>
       </form>
     </section>
+  );
+}
+
+function SQLiteViewer({
+  analysisTables,
+  error,
+  isLoading,
+  selectedTable,
+  setSelectedTable,
+  tableData,
+}: {
+  analysisTables: AnalysisTablesResponse | null;
+  error: string | null;
+  isLoading: boolean;
+  selectedTable: string | null;
+  setSelectedTable: (tableName: string) => void;
+  tableData: AnalysisTableResponse | null;
+}) {
+  return (
+    <section className="data-viewer">
+      <header className="viewer-header">
+        <div>
+          <p className="eyebrow">Extracted SQLite</p>
+          <h2>{analysisTables?.analysis?.description ?? "Analysis database"}</h2>
+        </div>
+        {analysisTables?.analysis ? <span className="score-pill">{analysisTables.analysis.extraction_score}/100</span> : null}
+      </header>
+
+      {error ? <p className="viewer-error">{error}</p> : null}
+      {isLoading && !tableData ? (
+        <div className="viewer-loading">
+          <Loader2 className="spin" size={18} />
+          <span>Loading extracted tables</span>
+        </div>
+      ) : null}
+
+      {analysisTables && analysisTables.tables.length === 0 ? (
+        <div className="viewer-empty">
+          <Database size={24} />
+          <p>No extracted SQLite tables found for this spreadsheet.</p>
+        </div>
+      ) : null}
+
+      {analysisTables && analysisTables.tables.length > 0 ? (
+        <div className="viewer-grid">
+          <aside className="table-picker">
+            {analysisTables.tables.map((table) => (
+              <button
+                className={selectedTable === table.table_name ? "active" : ""}
+                key={table.table_name}
+                type="button"
+                onClick={() => setSelectedTable(table.table_name)}
+              >
+                <Table2 size={16} />
+                <span>{table.table_name}</span>
+                <small>{table.row_count} rows</small>
+              </button>
+            ))}
+          </aside>
+
+          <DataTable columns={tableData?.columns ?? []} rows={tableData?.rows ?? []} />
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function RawDocumentViewer({
+  error,
+  isLoading,
+  rawPreview,
+}: {
+  error: string | null;
+  isLoading: boolean;
+  rawPreview: RawPreviewResponse | null;
+}) {
+  const [activeSheet, setActiveSheet] = useState(0);
+  const sheet = rawPreview?.preview.sheets[activeSheet] ?? rawPreview?.preview.sheets[0] ?? null;
+
+  useEffect(() => {
+    setActiveSheet(0);
+  }, [rawPreview?.filename]);
+
+  return (
+    <section className="data-viewer">
+      <header className="viewer-header">
+        <div>
+          <p className="eyebrow">Raw document</p>
+          <h2>{rawPreview?.filename ?? "Spreadsheet preview"}</h2>
+          {rawPreview ? (
+            <p className="muted">
+              {rawPreview.preview.format} · {formatBytes(rawPreview.sizeBytes)}
+            </p>
+          ) : null}
+        </div>
+      </header>
+
+      {error ? <p className="viewer-error">{error}</p> : null}
+      {isLoading && !rawPreview ? (
+        <div className="viewer-loading">
+          <Loader2 className="spin" size={18} />
+          <span>Loading raw preview</span>
+        </div>
+      ) : null}
+
+      {rawPreview && rawPreview.preview.sheets.length > 1 ? (
+        <nav className="sheet-tabs" aria-label="Raw spreadsheet sheets">
+          {rawPreview.preview.sheets.map((nextSheet, index) => (
+            <button className={index === activeSheet ? "active" : ""} key={nextSheet.name} type="button" onClick={() => setActiveSheet(index)}>
+              {nextSheet.name}
+            </button>
+          ))}
+        </nav>
+      ) : null}
+
+      {rawPreview && !sheet ? (
+        <div className="viewer-empty">
+          <FileText size={24} />
+          <p>No previewable rows were found in the raw spreadsheet.</p>
+        </div>
+      ) : null}
+
+      {sheet ? (
+        <DataTable
+          columns={Array.from({ length: sheet.columns }, (_, index) => `Column ${index + 1}`)}
+          rows={sheet.rows.map((row) =>
+            Object.fromEntries(Array.from({ length: sheet.columns }, (_, index) => [`Column ${index + 1}`, row[index] ?? ""])),
+          )}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function DataTable({ columns, rows }: { columns: string[]; rows: Record<string, unknown>[] }) {
+  if (columns.length === 0 || rows.length === 0) {
+    return (
+      <div className="viewer-empty">
+        <Table2 size={24} />
+        <p>No rows to preview.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="data-table-wrap">
+      <table className="data-table">
+        <thead>
+          <tr>
+            {columns.map((column) => (
+              <th key={column}>{column}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>
+              {columns.map((column) => (
+                <td key={column}>{cellText(row[column])}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

@@ -172,6 +172,71 @@ else:
 print(json.dumps(profile, ensure_ascii=False, allow_nan=False))
 `;
 
+const RAW_PREVIEW_SCRIPT = String.raw`
+import csv
+import json
+import math
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+path = Path(SPREADSHEET_PATH)
+suffix = path.suffix.lower()
+
+def clean(value):
+    if value is None:
+        return None
+    try:
+        if hasattr(value, "item"):
+            value = value.item()
+    except Exception:
+        pass
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        if value.is_integer():
+            return int(value)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+def normalize_rows(rows, limit=100):
+    return [[clean(cell) for cell in list(row)] for row in rows[:limit]]
+
+sheets = []
+
+if suffix in [".csv", ".tsv"]:
+    with open(path, newline="", encoding="utf-8-sig") as handle:
+        dialect = csv.excel_tab if suffix == ".tsv" else csv.excel
+        rows = list(csv.reader(handle, dialect=dialect))
+    sheets.append({"name": path.stem, "columns": max([len(row) for row in rows], default=0), "rows": normalize_rows(rows)})
+elif suffix in [".xlsx", ".xls", ".ods"]:
+    import pandas as pd
+    engine = "odf" if suffix == ".ods" else None
+    workbook = pd.read_excel(path, sheet_name=None, header=None, engine=engine, nrows=100, dtype=object)
+    for name, frame in workbook.items():
+        clean_frame = frame.where(frame.notna(), None)
+        sheets.append({
+            "name": str(name),
+            "columns": int(len(clean_frame.columns)),
+            "rows": normalize_rows(clean_frame.values.tolist()),
+        })
+elif suffix == ".xml":
+    tree = ET.parse(path)
+    root = tree.getroot()
+    rows = [["tag", "attributes", "text"]]
+    for element in root.iter():
+        text = (element.text or "").strip()
+        if element.attrib or text:
+            rows.append([element.tag, json.dumps(element.attrib, ensure_ascii=False), text])
+        if len(rows) >= 100:
+            break
+    sheets.append({"name": root.tag or path.stem, "columns": 3, "rows": rows})
+else:
+    raise ValueError(f"Unsupported file extension: {suffix}")
+
+print(json.dumps({"format": suffix.lstrip("."), "sheets": sheets}, ensure_ascii=False, allow_nan=False))
+`;
+
 function arrayBufferToBase64(buffer: ArrayBuffer) {
   let binary = "";
   const bytes = new Uint8Array(buffer);
@@ -260,6 +325,15 @@ function parseJsonText(text: string) {
   const jsonStart = starts.length ? Math.min(...starts) : -1;
   const jsonText = jsonStart >= 0 ? balancedJsonSlice(trimmed.slice(jsonStart)) : trimmed;
   return JSON.parse(jsonText.replace(/\b(?:NaN|Infinity|-Infinity)\b/g, "null"));
+}
+
+function parseStringArray(text: string) {
+  try {
+    const value = JSON.parse(text) as unknown;
+    return Array.isArray(value) ? value.map((item) => String(item)) : [];
+  } catch {
+    return [];
+  }
 }
 
 function balancedJsonSlice(text: string) {
@@ -825,6 +899,22 @@ export class HackathonAgent extends Think<Env> {
       return json({ traces: this.listTraces(url.searchParams.get("since")) });
     }
 
+    if (url.pathname.endsWith("/analysis-tables") && request.method === "GET") {
+      return json(this.listAnalysisTables());
+    }
+
+    if (url.pathname.endsWith("/analysis-table") && request.method === "GET") {
+      const tableName = url.searchParams.get("table");
+      if (!tableName) return json({ error: "Missing table query parameter." }, { status: 400 });
+      return json(this.getAnalysisTable(tableName));
+    }
+
+    if (url.pathname.endsWith("/raw-preview") && request.method === "GET") {
+      const spreadsheetId = spreadsheetIdFromAgentName(this.name);
+      if (!spreadsheetId) return json({ error: "This agent is not attached to a spreadsheet." }, { status: 400 });
+      return json(await this.getRawSpreadsheetPreview(spreadsheetId));
+    }
+
     if (url.pathname.endsWith("/api-request") && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as AgentRequestPayload;
       if (typeof body.message !== "string" || !body.message.trim()) {
@@ -1380,6 +1470,55 @@ export class HackathonAgent extends Think<Env> {
     return { analysis, tables };
   }
 
+  private listAnalysisTables() {
+    this.ensureFileSchema();
+    const analysis = this.sql`
+      SELECT spreadsheet_id, description, extraction_score, updated_at
+      FROM document_analysis
+      LIMIT 1
+    `;
+    const tables = this.sql<{
+      columns_json: string;
+      row_count: number;
+      source_name: string;
+      table_name: string;
+    }>`
+      SELECT table_name, source_name, columns_json, row_count
+      FROM document_tables
+      ORDER BY table_name
+    `.map((table) => ({
+      ...table,
+      columns: parseStringArray(table.columns_json),
+    }));
+
+    return { analysis: analysis[0] ?? null, tables };
+  }
+
+  private getAnalysisTable(tableName: string) {
+    this.ensureFileSchema();
+    const table = this.sql<{
+      columns_json: string;
+      row_count: number;
+      source_name: string;
+      table_name: string;
+    }>`
+      SELECT table_name, source_name, columns_json, row_count
+      FROM document_tables
+      WHERE table_name = ${tableName}
+      LIMIT 1
+    `[0];
+
+    if (!table) return { columns: [], rows: [], table: null };
+
+    const columns = parseStringArray(table.columns_json);
+    const rows = [...this.ctx.storage.sql.exec(`SELECT * FROM ${this.quoteIdentifier(tableName)} LIMIT 200`)];
+    return {
+      columns: ["source_row", "source_ref", ...columns],
+      rows,
+      table: { ...table, columns },
+    };
+  }
+
   private queryAnalysisDatabase(sql: string) {
     this.ensureFileSchema();
     const trimmed = sql.trim();
@@ -1389,6 +1528,49 @@ export class HackathonAgent extends Think<Env> {
     }
 
     return [...this.ctx.storage.sql.exec(trimmed)].slice(0, 200);
+  }
+
+  private async getRawSpreadsheetPreview(spreadsheetId: string) {
+    this.ensureFileSchema();
+    const file = this.sql<{
+      content_type: string;
+      filename: string;
+      r2_key: string | null;
+      sandbox_path: string;
+      size_bytes: number;
+    }>`
+      SELECT filename, content_type, size_bytes, sandbox_path, r2_key
+      FROM agent_spreadsheet_files
+      WHERE spreadsheet_id = ${spreadsheetId}
+      LIMIT 1
+    `[0];
+
+    if (!file?.r2_key) throw new Error("Raw spreadsheet file is not available in R2.");
+
+    const object = await this.env.SPREADSHEETS.get(file.r2_key);
+    if (!object) throw new Error("Raw spreadsheet object was not found in R2.");
+
+    const sandbox = getSandbox(this.env.Sandbox, `preview-${spreadsheetId}`);
+    const sandboxPath = `/workspace/previews/${spreadsheetId}/${safeFilename(file.filename)}`;
+    try {
+      await sandbox.mkdir(`/workspace/previews/${spreadsheetId}`, { recursive: true });
+      await sandbox.writeFile(sandboxPath, arrayBufferToBase64(await object.arrayBuffer()), {
+        encoding: "base64",
+      });
+      const result = await sandbox.exec(
+        `python3 - <<'PY'\nSPREADSHEET_PATH = ${JSON.stringify(sandboxPath)}\n${RAW_PREVIEW_SCRIPT}\nPY`,
+        { timeout: 60_000 },
+      );
+      if (!result.success) throw new Error(result.stderr || "Raw spreadsheet preview failed.");
+      return {
+        contentType: file.content_type,
+        filename: file.filename,
+        preview: parseJsonText(result.stdout),
+        sizeBytes: file.size_bytes,
+      };
+    } finally {
+      await sandbox.destroy().catch(() => undefined);
+    }
   }
 
   private safeSqlIdentifier(value: string) {
@@ -1609,6 +1791,32 @@ export default {
     const spreadsheetAgentRequestMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/agent-request$/);
     if (spreadsheetAgentRequestMatch && request.method === "POST") {
       return sendSpreadsheetAgentRequest(request, env, spreadsheetAgentRequestMatch[1]);
+    }
+
+    const spreadsheetTablesMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/tables$/);
+    if (spreadsheetTablesMatch && request.method === "GET") {
+      const spreadsheet = await getSpreadsheetRow(env, spreadsheetTablesMatch[1]);
+      if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+      const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(spreadsheet.agent_name));
+      return stub.fetch("https://agent.local/analysis-tables");
+    }
+
+    const spreadsheetTableMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/tables\/([^/]+)$/);
+    if (spreadsheetTableMatch && request.method === "GET") {
+      const spreadsheet = await getSpreadsheetRow(env, spreadsheetTableMatch[1]);
+      if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+      const tableUrl = new URL("https://agent.local/analysis-table");
+      tableUrl.searchParams.set("table", decodeURIComponent(spreadsheetTableMatch[2]));
+      const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(spreadsheet.agent_name));
+      return stub.fetch(tableUrl);
+    }
+
+    const spreadsheetRawPreviewMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/raw-preview$/);
+    if (spreadsheetRawPreviewMatch && request.method === "GET") {
+      const spreadsheet = await getSpreadsheetRow(env, spreadsheetRawPreviewMatch[1]);
+      if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+      const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(spreadsheet.agent_name));
+      return stub.fetch("https://agent.local/raw-preview");
     }
 
     const spreadsheetTraceMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/traces$/);
