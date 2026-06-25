@@ -10,8 +10,18 @@ export { Sandbox } from "@cloudflare/sandbox";
 type Env = {
   AI: Ai;
   ASSETS: Fetcher;
+  DB: D1Database;
   HackathonAgent: DurableObjectNamespace<HackathonAgent>;
   Sandbox: DurableObjectNamespace<SandboxType>;
+};
+
+type SpreadsheetRow = {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  agent_name: string;
+  uploaded_at: string;
 };
 
 const DEFAULT_SCRIPT = [
@@ -36,6 +46,97 @@ async function runPython(env: Env, code = DEFAULT_SCRIPT) {
   };
 }
 
+function json(data: unknown, init?: ResponseInit) {
+  return Response.json(data, {
+    headers: {
+      "cache-control": "no-store",
+      ...init?.headers,
+    },
+    status: init?.status,
+    statusText: init?.statusText,
+  });
+}
+
+function agentNameForSpreadsheet(id: string) {
+  return `spreadsheet-${id}`;
+}
+
+function isSpreadsheetFile(file: File) {
+  const name = file.name.toLowerCase();
+  return (
+    name.endsWith(".xlsx") ||
+    name.endsWith(".xls") ||
+    name.endsWith(".csv") ||
+    name.endsWith(".tsv")
+  );
+}
+
+async function listSpreadsheets(env: Env) {
+  const { results } = await env.DB.prepare(
+    [
+      "SELECT id, filename, content_type, size_bytes, agent_name, uploaded_at",
+      "FROM spreadsheets",
+      "ORDER BY uploaded_at DESC",
+    ].join(" "),
+  ).all<SpreadsheetRow>();
+
+  return json({ spreadsheets: results ?? [] });
+}
+
+async function getSpreadsheet(env: Env, id: string) {
+  const spreadsheet = await env.DB.prepare(
+    [
+      "SELECT id, filename, content_type, size_bytes, agent_name, uploaded_at",
+      "FROM spreadsheets",
+      "WHERE id = ?",
+    ].join(" "),
+  )
+    .bind(id)
+    .first<SpreadsheetRow>();
+
+  if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+  return json({ spreadsheet });
+}
+
+async function uploadSpreadsheet(request: Request, env: Env) {
+  const formData = await request.formData();
+  const file = formData.get("spreadsheet");
+
+  if (!(file instanceof File)) {
+    return json({ error: "Upload a spreadsheet file with field name 'spreadsheet'." }, { status: 400 });
+  }
+
+  if (!isSpreadsheetFile(file)) {
+    return json({ error: "Supported files: .xlsx, .xls, .csv, .tsv" }, { status: 400 });
+  }
+
+  const id = crypto.randomUUID();
+  const agentName = agentNameForSpreadsheet(id);
+
+  await env.DB.prepare(
+    [
+      "INSERT INTO spreadsheets",
+      "(id, filename, content_type, size_bytes, agent_name)",
+      "VALUES (?, ?, ?, ?, ?)",
+    ].join(" "),
+  )
+    .bind(id, file.name, file.type || "application/octet-stream", file.size, agentName)
+    .run();
+
+  return json(
+    {
+      spreadsheet: {
+        id,
+        filename: file.name,
+        content_type: file.type || "application/octet-stream",
+        size_bytes: file.size,
+        agent_name: agentName,
+      },
+    },
+    { status: 201 },
+  );
+}
+
 export class HackathonAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.7-code");
@@ -44,6 +145,8 @@ export class HackathonAgent extends Think<Env> {
   getSystemPrompt() {
     return [
       "You are a practical hackathon coding assistant.",
+      "You are scoped to one uploaded spreadsheet when your agent name starts with spreadsheet-.",
+      "The spreadsheet metadata lives in D1 and the browser selects the retained agent for that spreadsheet.",
       "When the user asks to run Python, use execute_python and explain the result briefly.",
       "Keep answers concise, concrete, and useful.",
     ].join("\n");
@@ -79,6 +182,19 @@ export default {
       }
 
       return Response.json(await runPython(env, code));
+    }
+
+    if (url.pathname === "/api/spreadsheets" && request.method === "GET") {
+      return listSpreadsheets(env);
+    }
+
+    if (url.pathname === "/api/spreadsheets" && request.method === "POST") {
+      return uploadSpreadsheet(request, env);
+    }
+
+    const spreadsheetMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)$/);
+    if (spreadsheetMatch && request.method === "GET") {
+      return getSpreadsheet(env, spreadsheetMatch[1]);
     }
 
     const agentResponse = await routeAgentRequest(request, env);

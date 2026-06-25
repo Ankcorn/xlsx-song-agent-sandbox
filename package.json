@@ -16,6 +16,8 @@
     "@cloudflare/ai-chat": "^0.8.6",
     "@cloudflare/sandbox": "^0.12.1",
     "@cloudflare/think": "^0.10.0",
+    "@tanstack/react-router": "^1.170.16",
+    "@tanstack/router-devtools": "^1.167.0",
     "agents": "^0.16.2",
     "ai": "^6.0.182",
     "lucide-react": "^0.468.0",

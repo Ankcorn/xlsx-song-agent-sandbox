@@ -15,6 +15,14 @@
   "ai": {
     "binding": "AI"
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "xlsx-song-spreadsheets",
+      "database_id": "4b7c41d5-0c34-4b81-9a05-b258eb84aa4a",
+      "migrations_dir": "migrations"
+    }
+  ],
   "containers": [
     {
       "class_name": "Sandbox",
