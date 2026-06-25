@@ -454,6 +454,21 @@ function configuredModelEntries(env: Env) {
   ];
 }
 
+function modelConfig(env: Env) {
+  const entries = configuredModelEntries(env);
+  const primary = entries[0] ?? {
+    model: "@cf/moonshotai/kimi-k2.7-code",
+    provider: "workers-ai",
+  };
+
+  return {
+    fallbackModels: entries.slice(1),
+    gatewayId: env.AI_GATEWAY_ID ?? "default",
+    model: primary.model,
+    provider: primary.provider,
+  };
+}
+
 function providerModel(providerName: string, modelId: string) {
   const provider = providerName.toLowerCase();
 
@@ -923,8 +938,9 @@ export class HackathonAgent extends Think<Env> {
 
       const requestId = crypto.randomUUID();
       const startedAt = Date.now();
+      const model = modelConfig(this.env);
       this.recordTrace({
-        detail: { message: body.message },
+        detail: { message: body.message, model },
         requestId,
         spanType: "api",
         status: "running",
@@ -952,8 +968,11 @@ export class HackathonAgent extends Think<Env> {
 
         return json({
           agentName: this.name,
+          finishReason: result.finishReason,
+          model,
           requestId,
           response: result.text,
+          usage: result.usage,
         });
       } catch (error) {
         this.recordTrace({
