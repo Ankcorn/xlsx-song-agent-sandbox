@@ -3,7 +3,6 @@ import { routeAgentRequest } from "agents";
 import { createAiGateway } from "ai-gateway-provider";
 import { createAnthropic } from "ai-gateway-provider/providers/anthropic";
 import { createOpenAI } from "ai-gateway-provider/providers/openai";
-import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { generateText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
@@ -144,7 +143,7 @@ export type AgentInitializationPayload = {
   }>;
 };
 
-type ExtractionWorkflowParams = {
+export type ExtractionWorkflowParams = {
   agentName: string;
   contentType: string;
   filename: string;
@@ -154,36 +153,6 @@ type ExtractionWorkflowParams = {
   spreadsheetId: string;
 };
 
-export type CodemodeExtraction = {
-  description: string;
-  filename: string;
-  format: string;
-  metadata: {
-    category: string;
-    confidence_score: number;
-    caveats: string;
-    description: string;
-    dimensions: Record<string, unknown>;
-    domain: string;
-    extraction_notes: string;
-    geography: string;
-    measures: Record<string, unknown>;
-    source_summary: string;
-    time_period: string;
-    title: string;
-    units: string;
-  };
-  tables: Array<{
-    columns: string[];
-    name: string;
-    rows: Array<{
-      cells: Record<string, string | number | boolean | null>;
-      source_ref: string;
-      source_row: number;
-    }>;
-  }>;
-};
-
 const DEFAULT_SCRIPT = [
   "from datetime import datetime",
   "numbers = [3, 5, 8, 13]",
@@ -191,195 +160,6 @@ const DEFAULT_SCRIPT = [
   "print('sum =', sum(numbers))",
   "print('utc =', datetime.utcnow().isoformat(timespec='seconds'))",
 ].join("\n");
-
-export const CODEMODE_INSPECTION_SCRIPT = String.raw`
-import csv
-import json
-import os
-import xml.etree.ElementTree as ET
-from pathlib import Path
-
-path = Path(SPREADSHEET_PATH)
-suffix = path.suffix.lower()
-
-def clean(value):
-    if value is None:
-        return None
-    try:
-        import math
-        if isinstance(value, float):
-            if math.isnan(value) or math.isinf(value):
-                return None
-            if value.is_integer():
-                return int(value)
-    except Exception:
-        pass
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return value
-
-def clean_matrix(rows, limit=20):
-    cleaned = []
-    for row in rows[:limit]:
-        cleaned.append([clean(value) for value in list(row)])
-    return cleaned
-
-def sniff_delimiter(path, fallback):
-    with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as handle:
-        sample = handle.read(65536)
-    if not sample.strip():
-        return fallback
-    try:
-        return csv.Sniffer().sniff(sample, delimiters=[",", "\t", ";", "|"]).delimiter
-    except Exception:
-        return fallback
-
-def inspect_delimited(path, suffix):
-    import pandas as pd
-    sep = "\t" if suffix == ".tsv" else sniff_delimiter(path, ",")
-    try:
-        return (
-            pd.read_csv(
-                path,
-                sep=sep,
-                header=None,
-                nrows=20,
-                dtype=object,
-                engine="python",
-                on_bad_lines="skip",
-                encoding="utf-8-sig",
-            ).where(lambda frame: frame.notna(), None),
-            sep,
-            "pandas-python",
-        )
-    except Exception as pandas_error:
-        rows = []
-        with open(path, newline="", encoding="utf-8-sig", errors="replace") as handle:
-            reader = csv.reader(handle, delimiter=sep)
-            for row_index, row in enumerate(reader):
-                if row_index >= 20:
-                    break
-                rows.append(row)
-        max_columns = max([len(row) for row in rows], default=0)
-        normalized = [row + [None] * (max_columns - len(row)) for row in rows]
-        return pd.DataFrame(normalized, dtype=object), sep, f"csv-reader fallback after {type(pandas_error).__name__}"
-
-profile = {
-    "filename": path.name,
-    "extension": suffix,
-    "size_bytes": path.stat().st_size,
-    "sheets": [],
-}
-
-if suffix in [".csv", ".tsv"]:
-    sample, delimiter, parser = inspect_delimited(path, suffix)
-    profile["sheets"].append({
-        "name": path.stem,
-        "rows_seen": int(len(sample.index)),
-        "columns_seen": int(len(sample.columns)),
-        "delimiter": delimiter,
-        "parser": parser,
-        "sample": clean_matrix(sample.values.tolist()),
-    })
-elif suffix in [".xlsx", ".xls", ".ods"]:
-    import pandas as pd
-    engine = "odf" if suffix == ".ods" else None
-    sheets = pd.read_excel(path, sheet_name=None, header=None, engine=engine, nrows=20, dtype=object)
-    for sheet_name, frame in sheets.items():
-        sample = frame.where(frame.notna(), None)
-        profile["sheets"].append({
-            "name": str(sheet_name),
-            "rows_seen": int(len(sample.index)),
-            "columns_seen": int(len(sample.columns)),
-            "sample": clean_matrix(sample.values.tolist()),
-        })
-elif suffix == ".xml":
-    tree = ET.parse(path)
-    root = tree.getroot()
-    elements = []
-    for element_index, element in enumerate(root.iter(), start=1):
-        if element_index > 40:
-            break
-        text = (element.text or "").strip()
-        if element.attrib or text:
-            elements.append({"attributes": dict(element.attrib), "tag": element.tag, "text": text[:500]})
-    profile["root_tag"] = root.tag
-    profile["sheets"].append({
-        "name": root.tag or path.stem,
-        "rows_seen": len(elements),
-        "columns_seen": 3,
-        "sample": elements,
-    })
-else:
-    raise ValueError(f"Unsupported file extension: {suffix}")
-
-print(json.dumps(profile, ensure_ascii=False, allow_nan=False))
-`;
-
-export const RAW_PREVIEW_SCRIPT = String.raw`
-import csv
-import json
-import math
-import xml.etree.ElementTree as ET
-from pathlib import Path
-
-path = Path(SPREADSHEET_PATH)
-suffix = path.suffix.lower()
-
-def clean(value):
-    if value is None:
-        return None
-    try:
-        if hasattr(value, "item"):
-            value = value.item()
-    except Exception:
-        pass
-    if isinstance(value, float):
-        if math.isnan(value) or math.isinf(value):
-            return None
-        if value.is_integer():
-            return int(value)
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return value
-
-def normalize_rows(rows, limit=100):
-    return [[clean(cell) for cell in list(row)] for row in rows[:limit]]
-
-sheets = []
-
-if suffix in [".csv", ".tsv"]:
-    with open(path, newline="", encoding="utf-8-sig") as handle:
-        dialect = csv.excel_tab if suffix == ".tsv" else csv.excel
-        rows = list(csv.reader(handle, dialect=dialect))
-    sheets.append({"name": path.stem, "columns": max([len(row) for row in rows], default=0), "rows": normalize_rows(rows)})
-elif suffix in [".xlsx", ".xls", ".ods"]:
-    import pandas as pd
-    engine = "odf" if suffix == ".ods" else None
-    workbook = pd.read_excel(path, sheet_name=None, header=None, engine=engine, nrows=100, dtype=object)
-    for name, frame in workbook.items():
-        clean_frame = frame.where(frame.notna(), None)
-        sheets.append({
-            "name": str(name),
-            "columns": int(len(clean_frame.columns)),
-            "rows": normalize_rows(clean_frame.values.tolist()),
-        })
-elif suffix == ".xml":
-    tree = ET.parse(path)
-    root = tree.getroot()
-    rows = [["tag", "attributes", "text"]]
-    for element in root.iter():
-        text = (element.text or "").strip()
-        if element.attrib or text:
-            rows.append([element.tag, json.dumps(element.attrib, ensure_ascii=False), text])
-        if len(rows) >= 100:
-            break
-    sheets.append({"name": root.tag or path.stem, "columns": 3, "rows": rows})
-else:
-    raise ValueError(f"Unsupported file extension: {suffix}")
-
-print(json.dumps({"format": suffix.lstrip("."), "sheets": sheets}, ensure_ascii=False, allow_nan=False))
-`;
 
 export function arrayBufferToBase64(buffer: ArrayBuffer) {
   let binary = "";
@@ -512,101 +292,6 @@ function balancedJsonSlice(text: string) {
   return text;
 }
 
-function normalizeJsonValue(value: unknown): string | number | boolean | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (value instanceof Date) return value.toISOString();
-  return JSON.stringify(value);
-}
-
-export function normalizeCodemodeExtraction(value: unknown, filename: string): CodemodeExtraction {
-  const input = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  const metadataInput = input.metadata && typeof input.metadata === "object" ? (input.metadata as Record<string, unknown>) : {};
-  const rawTables = Array.isArray(input.tables) ? input.tables : [];
-  const tables = rawTables.map((rawTable, tableIndex) => {
-    const table = rawTable && typeof rawTable === "object" ? (rawTable as Record<string, unknown>) : {};
-    const rawRows = Array.isArray(table.rows) ? table.rows : [];
-    const inferredColumns = new Set<string>();
-
-    for (const rawRow of rawRows) {
-      const row = rawRow && typeof rawRow === "object" ? (rawRow as Record<string, unknown>) : {};
-      const cells = row.cells && typeof row.cells === "object" ? (row.cells as Record<string, unknown>) : {};
-      for (const column of Object.keys(cells)) inferredColumns.add(column);
-    }
-
-    const listedColumns = Array.isArray(table.columns) ? table.columns : [];
-    const columns = [...listedColumns, ...[...inferredColumns].filter((column) => !listedColumns.includes(column))]
-      .map((column, columnIndex) => String(column || `column_${columnIndex + 1}`))
-      .filter(Boolean);
-
-    const rows = rawRows.map((rawRow, rowIndex) => {
-      const row = rawRow && typeof rawRow === "object" ? (rawRow as Record<string, unknown>) : {};
-      const cells = row.cells && typeof row.cells === "object" ? (row.cells as Record<string, unknown>) : {};
-      const sourceRow = typeof row.source_row === "number" && Number.isFinite(row.source_row) ? row.source_row : rowIndex + 1;
-      const normalizedCells: Record<string, string | number | boolean | null> = {};
-
-      for (const column of columns) {
-        normalizedCells[column] = normalizeJsonValue(cells[column]);
-      }
-
-      return {
-        cells: normalizedCells,
-        source_ref: typeof row.source_ref === "string" ? row.source_ref : `${table.name ?? `table_${tableIndex + 1}`}!row:${sourceRow}`,
-        source_row: sourceRow,
-      };
-    });
-
-    return {
-      columns,
-      name: typeof table.name === "string" && table.name.trim() ? table.name : `table_${tableIndex + 1}`,
-      rows,
-    };
-  });
-
-  const description =
-      typeof input.description === "string" && input.description.trim()
-        ? input.description
-        : typeof metadataInput.description === "string" && metadataInput.description.trim()
-          ? metadataInput.description
-          : `${filename} was analyzed in codemode into ${tables.length} table${tables.length === 1 ? "" : "s"}.`;
-  const metadata = {
-    category: typeof metadataInput.category === "string" && metadataInput.category.trim() ? metadataInput.category : "Uncategorised",
-    caveats: typeof metadataInput.caveats === "string" ? metadataInput.caveats : "",
-    confidence_score:
-      typeof metadataInput.confidence_score === "number" && Number.isFinite(metadataInput.confidence_score)
-        ? Math.max(0, Math.min(100, Math.round(metadataInput.confidence_score)))
-        : 75,
-    description,
-    dimensions:
-      metadataInput.dimensions && typeof metadataInput.dimensions === "object"
-        ? (metadataInput.dimensions as Record<string, unknown>)
-        : {},
-    domain: typeof metadataInput.domain === "string" && metadataInput.domain.trim() ? metadataInput.domain : "general",
-    extraction_notes: typeof metadataInput.extraction_notes === "string" ? metadataInput.extraction_notes : "",
-    geography: typeof metadataInput.geography === "string" ? metadataInput.geography : "",
-    measures:
-      metadataInput.measures && typeof metadataInput.measures === "object"
-        ? (metadataInput.measures as Record<string, unknown>)
-        : {},
-    source_summary: typeof metadataInput.source_summary === "string" ? metadataInput.source_summary : "",
-    time_period: typeof metadataInput.time_period === "string" ? metadataInput.time_period : "",
-    title:
-      typeof metadataInput.title === "string" && metadataInput.title.trim()
-        ? metadataInput.title
-        : filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "),
-    units: typeof metadataInput.units === "string" ? metadataInput.units : "",
-  };
-
-  return {
-    description,
-    filename: typeof input.filename === "string" ? input.filename : filename,
-    format: typeof input.format === "string" ? input.format : filename.split(".").pop()?.toLowerCase() ?? "unknown",
-    metadata,
-    tables,
-  };
-}
-
 export function configuredModelEntries(env: Env) {
   const fallbackEntries = env.AI_GATEWAY_FALLBACKS?.split(",")
     .map((entry) => entry.trim())
@@ -723,49 +408,6 @@ export function traceDetail(summary: string, snippet?: unknown) {
     snippet: snippet === undefined ? undefined : traceSnippet(snippet),
     summary,
   };
-}
-
-export function profileSummary(profile: unknown) {
-  if (typeof profile !== "object" || profile === null) return profile;
-  const record = profile as {
-    extension?: unknown;
-    filename?: unknown;
-    sheets?: unknown;
-    size_bytes?: unknown;
-  };
-  const sheets = Array.isArray(record.sheets)
-    ? record.sheets.map((sheet) => {
-        if (typeof sheet !== "object" || sheet === null) return sheet;
-        const typedSheet = sheet as {
-          columns_seen?: unknown;
-          delimiter?: unknown;
-          name?: unknown;
-          parser?: unknown;
-          rows_seen?: unknown;
-        };
-        return {
-          columns_seen: typedSheet.columns_seen,
-          delimiter: typedSheet.delimiter,
-          name: typedSheet.name,
-          parser: typedSheet.parser,
-          rows_seen: typedSheet.rows_seen,
-        };
-      })
-    : [];
-  return {
-    extension: record.extension,
-    filename: record.filename,
-    sheets,
-    size_bytes: record.size_bytes,
-  };
-}
-
-export function extractionTableSummary(extraction: CodemodeExtraction) {
-  return extraction.tables.map((table) => ({
-    columns: table.columns.slice(0, 12),
-    name: table.name,
-    row_count: table.rows.length,
-  }));
 }
 
 export function safeFilename(filename: string) {
@@ -1718,90 +1360,6 @@ async function deleteSpreadsheet(env: Env, spreadsheetId: string) {
   }
 
   return json({ ok: true });
-}
-
-export class ExtractionWorkflow extends WorkflowEntrypoint<Env, ExtractionWorkflowParams> {
-  async run(event: WorkflowEvent<ExtractionWorkflowParams>, step: WorkflowStep) {
-    const payload = event.payload;
-    const stub = this.env.SheetsThink.get(this.env.SheetsThink.idFromName(payload.agentName));
-
-    await step.do("mark spreadsheet processing", async () => {
-      await this.env.DB.prepare(
-        [
-          "UPDATE spreadsheets",
-          "SET status = 'processing', pre_extract = 1, error_message = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-          "WHERE id = ?",
-        ].join(" "),
-      )
-        .bind(payload.spreadsheetId)
-        .run();
-    });
-
-    try {
-      await step.do("store agent file reference", async () => {
-        const response = await stub.fetch("https://agent.local/spreadsheet-file", {
-          body: JSON.stringify({
-            contentType: payload.contentType,
-            filename: payload.filename,
-            preExtract: true,
-            r2Key: payload.r2Key,
-            sandboxPath: payload.sandboxPath,
-            sizeBytes: payload.sizeBytes,
-            spreadsheetId: payload.spreadsheetId,
-          }),
-          headers: { "content-type": "application/json" },
-          method: "POST",
-        });
-        if (!response.ok) throw new Error((await response.text()) || "Failed to persist spreadsheet file metadata.");
-      });
-
-      const analysis = await step.do(
-        "run codemode extraction",
-        { retries: { backoff: "exponential", delay: "10 seconds", limit: 2 } },
-        async () => {
-          const response = await stub.fetch("https://agent.local/retry-extraction", {
-            body: JSON.stringify({
-              filename: payload.filename,
-              sandboxPath: payload.sandboxPath,
-              spreadsheetId: payload.spreadsheetId,
-            }),
-            headers: { "content-type": "application/json" },
-            method: "POST",
-          });
-          if (!response.ok) throw new Error((await response.text()) || "Failed to analyze spreadsheet file.");
-          return response.json() as Promise<Record<string, string | number>>;
-        },
-      );
-
-      await step.do("mark spreadsheet ready", async () => {
-        await this.env.DB.prepare(
-          [
-            "UPDATE spreadsheets",
-            "SET status = 'ready', pre_extract = 1, error_message = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-            "WHERE id = ?",
-          ].join(" "),
-        )
-          .bind(payload.spreadsheetId)
-          .run();
-      });
-
-      return analysis;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Extraction workflow failed";
-      await step.do("mark spreadsheet failed", async () => {
-        await this.env.DB.prepare(
-          [
-            "UPDATE spreadsheets",
-            "SET status = 'failed', error_message = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-            "WHERE id = ?",
-          ].join(" "),
-        )
-          .bind(message, payload.spreadsheetId)
-          .run();
-      });
-      throw error;
-    }
-  }
 }
 
 async function destroyUploadSandbox(sandbox: ReturnType<typeof getSandbox>, stub: DurableObjectStub) {

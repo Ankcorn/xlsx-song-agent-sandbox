@@ -688,7 +688,11 @@ function UploadPage() {
       try {
         const message = JSON.parse(event.data) as unknown;
         if (!isAgentTraceMessage(message)) return;
-        setUploadTraces((current) => [...current.filter((trace) => trace.id !== message.trace.id), message.trace].slice(-20));
+        setUploadTraces((current) =>
+          [...current.filter((trace) => trace.id !== message.trace.id), message.trace].sort(
+            (left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime(),
+          ),
+        );
       } catch {
         return;
       }
@@ -706,9 +710,7 @@ function UploadPage() {
         setUploadTraces((current) => {
           const traces = new Map(current.map((trace) => [trace.id, trace]));
           for (const trace of data.traces) traces.set(trace.id, trace);
-          return [...traces.values()]
-            .sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime())
-            .slice(-30);
+          return [...traces.values()].sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime());
         });
       } catch {
         // Websocket updates remain the primary path; polling is just a resilience net.
@@ -802,8 +804,13 @@ function UploadPage() {
     }
   }
 
+  const hasUploadStarted = isUploading || uploadTraces.length > 0 || Boolean(uploadSpreadsheetId);
+  const latestTrace = uploadTraces[uploadTraces.length - 1] ?? null;
+  const completedTraceCount = uploadTraces.filter((trace) => trace.status === "done").length;
+  const runningTraceCount = uploadTraces.filter((trace) => trace.status === "running").length;
+
   return (
-    <section className="content-band narrow">
+    <section className={`content-band upload-page ${hasUploadStarted ? "is-processing" : "narrow"}`}>
       <Link to="/" className="back-link">
         <ArrowLeft size={18} />
         <span>Spreadsheets</span>
@@ -815,77 +822,107 @@ function UploadPage() {
         </div>
       </header>
 
-      <form className="upload-form" onSubmit={submitUpload}>
-        <label
-          className={`file-drop ${isDragging ? "is-dragging" : ""}`}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-        >
-          <Upload size={28} />
-          <span>{file ? file.name : "Drop a spreadsheet here or choose .xlsx, .xls, .csv, .tsv, .ods, or .xml"}</span>
-          <input
-            accept=".xlsx,.xls,.csv,.tsv,.ods,.xml"
-            type="file"
-            onChange={(event) => selectFile(event.target.files?.[0] ?? null)}
-          />
-        </label>
+      {!hasUploadStarted ? (
+        <form className="upload-form" onSubmit={submitUpload}>
+          <label
+            className={`file-drop ${isDragging ? "is-dragging" : ""}`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            <Upload size={28} />
+            <span>{file ? file.name : "Drop a spreadsheet here or choose .xlsx, .xls, .csv, .tsv, .ods, or .xml"}</span>
+            <input
+              accept=".xlsx,.xls,.csv,.tsv,.ods,.xml"
+              type="file"
+              onChange={(event) => selectFile(event.target.files?.[0] ?? null)}
+            />
+          </label>
 
-        <label className="form-field">
-          <span>Category</span>
-          <Input value={category} onChange={(event) => setCategory(event.target.value)} placeholder="Uncategorised" />
-        </label>
+          <label className="form-field">
+            <span>Category</span>
+            <Input value={category} onChange={(event) => setCategory(event.target.value)} placeholder="Uncategorised" />
+          </label>
 
-        <label className="mode-toggle">
-          <input
-            checked={preExtract}
-            disabled={isUploading}
-            type="checkbox"
-            onChange={(event) => setPreExtract(event.target.checked)}
-          />
-          <span />
-          <strong>{preExtract ? "Pre-extract with codemode" : "Just upload"}</strong>
-        </label>
+          <label className="mode-toggle">
+            <input
+              checked={preExtract}
+              disabled={isUploading}
+              type="checkbox"
+              onChange={(event) => setPreExtract(event.target.checked)}
+            />
+            <span />
+            <strong>{preExtract ? "Pre-extract with codemode" : "Just upload"}</strong>
+          </label>
 
-        {error ? <Banner variant="error" title="Upload failed" description={error} /> : null}
+          {error ? <Banner variant="error" title="Upload failed" description={error} /> : null}
 
-        <Button
-          className="primary-button"
-          icon={<Upload size={18} />}
-          loading={isUploading}
-          type="submit"
-          variant="primary"
-          disabled={!file || isUploading}
-        >
-          <span>{isUploading ? "Uploading" : "Create agent"}</span>
-        </Button>
+          <Button
+            className="primary-button"
+            icon={<Upload size={18} />}
+            loading={isUploading}
+            type="submit"
+            variant="primary"
+            disabled={!file || isUploading}
+          >
+            <span>Create agent</span>
+          </Button>
+        </form>
+      ) : (
+        <section className="upload-processing">
+          <div className="upload-processing-summary">
+            <div>
+              <p className="eyebrow">{preExtract ? "Codemode analysis" : "Upload"}</p>
+              <h2>{file?.name ?? "Spreadsheet upload"}</h2>
+              <p>
+                {category.trim() || "Uncategorised"} · {preExtract ? "Pre-extracting into an agent SQLite database" : "Storing file"}
+              </p>
+            </div>
+            <div className="upload-progress-stats">
+              <strong>{uploadTraces.length}</strong>
+              <span>steps</span>
+              <strong>{completedTraceCount}</strong>
+              <span>done</span>
+              <strong>{runningTraceCount}</strong>
+              <span>running</span>
+            </div>
+          </div>
 
-        {(isUploading || uploadTraces.length > 0) && (
+          {error ? <Banner variant="error" title="Upload failed" description={error} /> : null}
+
           <div className="upload-steps">
             <header>
               <p className="eyebrow">{preExtract ? "Analysis" : "Upload"}</p>
-              <h2>{preExtract ? "Preparing spreadsheet agent" : "Storing spreadsheet file"}</h2>
+              <h2>{latestTrace?.title ?? (preExtract ? "Preparing spreadsheet agent" : "Storing spreadsheet file")}</h2>
             </header>
-            <ol className="upload-step-carousel" aria-label="Upload and analysis steps">
+            <ol className="upload-step-list" aria-label="Upload and analysis steps">
               {uploadTraces.map((trace) => {
                 const detail = traceDetailParts(trace.detail);
                 return (
                   <li className={`upload-step-card ${trace.status}`} key={trace.id}>
-                    <span className="trace-dot" />
-                    <div className="trace-title-row">
-                      <h3>{trace.title}</h3>
-                      {trace.duration_ms ? <span>{trace.duration_ms}ms</span> : null}
+                    <div className="upload-step-status">
+                      <span className="trace-dot" />
+                      <span>{trace.status}</span>
                     </div>
-                    <p className="upload-step-type">{trace.span_type}</p>
-                    {detail.summary ? <p className="upload-step-summary">{detail.summary}</p> : null}
-                    {detail.snippet ? <pre>{detail.snippet}</pre> : detail.raw ? <pre>{detail.raw}</pre> : null}
+                    <div className="upload-step-body">
+                      <div className="trace-title-row">
+                        <h3>{trace.title}</h3>
+                        {trace.duration_ms ? <span>{trace.duration_ms}ms</span> : null}
+                      </div>
+                      <p className="upload-step-type">
+                        {trace.span_type}
+                        {trace.step_number !== null ? ` · step ${trace.step_number}` : ""}
+                      </p>
+                      {detail.summary ? <p className="upload-step-summary">{detail.summary}</p> : null}
+                      {detail.snippet ? <pre>{detail.snippet}</pre> : detail.raw ? <pre>{detail.raw}</pre> : null}
+                    </div>
                   </li>
                 );
               })}
             </ol>
           </div>
-        )}
-      </form>
+        </section>
+      )}
     </section>
   );
 }

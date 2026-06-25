@@ -5,19 +5,14 @@ import { createAiGateway } from "ai-gateway-provider";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import {
-  CODEMODE_INSPECTION_SCRIPT,
   arrayBufferToBase64,
-  RAW_PREVIEW_SCRIPT,
   configuredModelEntries,
-  extractionTableSummary,
   getSpreadsheetRow,
   json,
   listSpreadsheetRevisionRows,
   modelConfig,
-  normalizeCodemodeExtraction,
   parseJsonText,
   parseStringArray,
-  profileSummary,
   providerModel,
   runPython,
   safeFilename,
@@ -27,10 +22,757 @@ import {
   traceDetail,
   type AgentRequestPayload,
   type AgentTraceEvent,
-  type CodemodeExtraction,
   type Env,
   type TraceInput,
 } from "./http";
+
+type CodemodeExtraction = {
+  description: string;
+  filename: string;
+  format: string;
+  metadata: {
+    category: string;
+    confidence_score: number;
+    caveats: string;
+    description: string;
+    dimensions: Record<string, unknown>;
+    domain: string;
+    extraction_notes: string;
+    geography: string;
+    measures: Record<string, unknown>;
+    source_summary: string;
+    time_period: string;
+    title: string;
+    units: string;
+  };
+  tables: Array<{
+    columns: string[];
+    name: string;
+    rows: Array<{
+      cells: Record<string, string | number | boolean | null>;
+      source_ref: string;
+      source_row: number;
+    }>;
+  }>;
+};
+
+
+const CODEMODE_INSPECTION_SCRIPT = String.raw`
+import csv
+import json
+import os
+import xml.etree.ElementTree as ET
+import zipfile
+from pathlib import Path
+
+path = Path(SPREADSHEET_PATH)
+suffix = path.suffix.lower()
+
+def clean(value):
+    if value is None:
+        return None
+    try:
+        import math
+        if isinstance(value, float):
+            if math.isnan(value) or math.isinf(value):
+                return None
+            if value.is_integer():
+                return int(value)
+    except Exception:
+        pass
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+def clean_matrix(rows, limit=20):
+    cleaned = []
+    for row in rows[:limit]:
+        cleaned.append([clean(value) for value in list(row)])
+    return cleaned
+
+def sniff_delimiter(path, fallback):
+    with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+        sample = handle.read(65536)
+    if not sample.strip():
+        return fallback
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=[",", "\t", ";", "|"]).delimiter
+    except Exception:
+        return fallback
+
+def inspect_delimited(path, suffix):
+    import pandas as pd
+    sep = "\t" if suffix == ".tsv" else sniff_delimiter(path, ",")
+    try:
+        return (
+            pd.read_csv(
+                path,
+                sep=sep,
+                header=None,
+                nrows=20,
+                dtype=object,
+                engine="python",
+                on_bad_lines="skip",
+                encoding="utf-8-sig",
+            ).where(lambda frame: frame.notna(), None),
+            sep,
+            "pandas-python",
+        )
+    except Exception as pandas_error:
+        rows = []
+        with open(path, newline="", encoding="utf-8-sig", errors="replace") as handle:
+            reader = csv.reader(handle, delimiter=sep)
+            for row_index, row in enumerate(reader):
+                if row_index >= 20:
+                    break
+                rows.append(row)
+        max_columns = max([len(row) for row in rows], default=0)
+        normalized = [row + [None] * (max_columns - len(row)) for row in rows]
+        return pd.DataFrame(normalized, dtype=object), sep, f"csv-reader fallback after {type(pandas_error).__name__}"
+
+def text_from_cell(cell, ns):
+    values = []
+    for text_node in cell.findall(".//text:p", ns):
+        text = "".join(text_node.itertext()).strip()
+        if text:
+            values.append(text)
+    if values:
+        return "\n".join(values)
+    return cell.attrib.get(f"{{{ns['office']}}}value") or cell.attrib.get(f"{{{ns['office']}}}string-value") or ""
+
+def inspect_ods(path, max_sheets=12, max_rows=20, max_cells=80):
+    ns = {
+        "office": "urn:oasis:names:tc:opendocument:xmlns:office:1.0",
+        "table": "urn:oasis:names:tc:opendocument:xmlns:table:1.0",
+        "text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0",
+    }
+    sheets = []
+    with zipfile.ZipFile(path) as archive:
+        with archive.open("content.xml") as handle:
+            context = ET.iterparse(handle, events=("end",))
+            for _, element in context:
+                if element.tag != f"{{{ns['table']}}}table":
+                    continue
+                sheet_name = element.attrib.get(f"{{{ns['table']}}}name", f"sheet_{len(sheets) + 1}")
+                rows = []
+                max_columns = 0
+                for row in element.findall("table:table-row", ns):
+                    repeat_rows = int(row.attrib.get(f"{{{ns['table']}}}number-rows-repeated", "1") or "1")
+                    if repeat_rows > 1000:
+                        repeat_rows = 1
+                    row_values = []
+                    for cell in list(row):
+                        if cell.tag not in {
+                            f"{{{ns['table']}}}table-cell",
+                            f"{{{ns['table']}}}covered-table-cell",
+                        }:
+                            continue
+                        repeat_cols = int(cell.attrib.get(f"{{{ns['table']}}}number-columns-repeated", "1") or "1")
+                        if repeat_cols > 1000:
+                            repeat_cols = 1
+                        value = text_from_cell(cell, ns)
+                        for _ in range(repeat_cols):
+                            if len(row_values) >= max_cells:
+                                break
+                            row_values.append(value)
+                        if len(row_values) >= max_cells:
+                            break
+                    if any(str(value).strip() for value in row_values):
+                        for _ in range(min(repeat_rows, max_rows - len(rows))):
+                            rows.append(row_values)
+                            max_columns = max(max_columns, len(row_values))
+                    if len(rows) >= max_rows:
+                        break
+                sheets.append({
+                    "name": sheet_name,
+                    "rows_seen": len(rows),
+                    "columns_seen": max_columns,
+                    "parser": "ods-content-xml",
+                    "sample": clean_matrix(rows),
+                })
+                element.clear()
+                if len(sheets) >= max_sheets:
+                    break
+    return sheets
+
+profile = {
+    "filename": path.name,
+    "extension": suffix,
+    "size_bytes": path.stat().st_size,
+    "sheets": [],
+}
+
+if suffix in [".csv", ".tsv"]:
+    sample, delimiter, parser = inspect_delimited(path, suffix)
+    profile["sheets"].append({
+        "name": path.stem,
+        "rows_seen": int(len(sample.index)),
+        "columns_seen": int(len(sample.columns)),
+        "delimiter": delimiter,
+        "parser": parser,
+        "sample": clean_matrix(sample.values.tolist()),
+    })
+elif suffix == ".ods":
+    profile["sheets"].extend(inspect_ods(path))
+elif suffix in [".xlsx", ".xls"]:
+    import pandas as pd
+    sheets = pd.read_excel(path, sheet_name=None, header=None, nrows=20, dtype=object)
+    for sheet_name, frame in sheets.items():
+        sample = frame.where(frame.notna(), None)
+        profile["sheets"].append({
+            "name": str(sheet_name),
+            "rows_seen": int(len(sample.index)),
+            "columns_seen": int(len(sample.columns)),
+            "sample": clean_matrix(sample.values.tolist()),
+        })
+elif suffix == ".xml":
+    tree = ET.parse(path)
+    root = tree.getroot()
+    elements = []
+    for element_index, element in enumerate(root.iter(), start=1):
+        if element_index > 40:
+            break
+        text = (element.text or "").strip()
+        if element.attrib or text:
+            elements.append({"attributes": dict(element.attrib), "tag": element.tag, "text": text[:500]})
+    profile["root_tag"] = root.tag
+    profile["sheets"].append({
+        "name": root.tag or path.stem,
+        "rows_seen": len(elements),
+        "columns_seen": 3,
+        "sample": elements,
+    })
+else:
+    raise ValueError(f"Unsupported file extension: {suffix}")
+
+print(json.dumps(profile, ensure_ascii=False, allow_nan=False))
+`;
+
+const RAW_PREVIEW_SCRIPT = String.raw`
+import csv
+import json
+import math
+import xml.etree.ElementTree as ET
+import zipfile
+from pathlib import Path
+
+path = Path(SPREADSHEET_PATH)
+suffix = path.suffix.lower()
+
+def clean(value):
+    if value is None:
+        return None
+    try:
+        if hasattr(value, "item"):
+            value = value.item()
+    except Exception:
+        pass
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        if value.is_integer():
+            return int(value)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+def normalize_rows(rows, limit=100):
+    return [[clean(cell) for cell in list(row)] for row in rows[:limit]]
+
+def ods_cell_text(cell, ns):
+    values = []
+    for text_node in cell.findall(".//text:p", ns):
+        text = "".join(text_node.itertext()).strip()
+        if text:
+            values.append(text)
+    if values:
+        return "\n".join(values)
+    return cell.attrib.get(f"{{{ns['office']}}}value") or cell.attrib.get(f"{{{ns['office']}}}string-value") or ""
+
+def preview_ods(path, max_sheets=12, max_rows=100, max_cells=80):
+    ns = {
+        "office": "urn:oasis:names:tc:opendocument:xmlns:office:1.0",
+        "table": "urn:oasis:names:tc:opendocument:xmlns:table:1.0",
+        "text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0",
+    }
+    output = []
+    with zipfile.ZipFile(path) as archive:
+        with archive.open("content.xml") as handle:
+            for _, element in ET.iterparse(handle, events=("end",)):
+                if element.tag != f"{{{ns['table']}}}table":
+                    continue
+                sheet_name = element.attrib.get(f"{{{ns['table']}}}name", f"sheet_{len(output) + 1}")
+                rows = []
+                max_columns = 0
+                for row in element.findall("table:table-row", ns):
+                    row_values = []
+                    repeat_rows = int(row.attrib.get(f"{{{ns['table']}}}number-rows-repeated", "1") or "1")
+                    if repeat_rows > 1000:
+                        repeat_rows = 1
+                    for cell in list(row):
+                        if cell.tag not in {
+                            f"{{{ns['table']}}}table-cell",
+                            f"{{{ns['table']}}}covered-table-cell",
+                        }:
+                            continue
+                        repeat_cols = int(cell.attrib.get(f"{{{ns['table']}}}number-columns-repeated", "1") or "1")
+                        if repeat_cols > 1000:
+                            repeat_cols = 1
+                        value = ods_cell_text(cell, ns)
+                        for _ in range(repeat_cols):
+                            if len(row_values) >= max_cells:
+                                break
+                            row_values.append(value)
+                        if len(row_values) >= max_cells:
+                            break
+                    if any(str(value).strip() for value in row_values):
+                        for _ in range(min(repeat_rows, max_rows - len(rows))):
+                            rows.append(row_values)
+                            max_columns = max(max_columns, len(row_values))
+                    if len(rows) >= max_rows:
+                        break
+                output.append({"name": sheet_name, "columns": max_columns, "rows": normalize_rows(rows)})
+                element.clear()
+                if len(output) >= max_sheets:
+                    break
+    return output
+
+sheets = []
+
+if suffix in [".csv", ".tsv"]:
+    with open(path, newline="", encoding="utf-8-sig") as handle:
+        dialect = csv.excel_tab if suffix == ".tsv" else csv.excel
+        rows = list(csv.reader(handle, dialect=dialect))
+    sheets.append({"name": path.stem, "columns": max([len(row) for row in rows], default=0), "rows": normalize_rows(rows)})
+elif suffix == ".ods":
+    sheets.extend(preview_ods(path))
+elif suffix in [".xlsx", ".xls"]:
+    import pandas as pd
+    workbook = pd.read_excel(path, sheet_name=None, header=None, nrows=100, dtype=object)
+    for name, frame in workbook.items():
+        clean_frame = frame.where(frame.notna(), None)
+        sheets.append({
+            "name": str(name),
+            "columns": int(len(clean_frame.columns)),
+            "rows": normalize_rows(clean_frame.values.tolist()),
+        })
+elif suffix == ".xml":
+    tree = ET.parse(path)
+    root = tree.getroot()
+    rows = [["tag", "attributes", "text"]]
+    for element in root.iter():
+        text = (element.text or "").strip()
+        if element.attrib or text:
+            rows.append([element.tag, json.dumps(element.attrib, ensure_ascii=False), text])
+        if len(rows) >= 100:
+            break
+    sheets.append({"name": root.tag or path.stem, "columns": 3, "rows": rows})
+else:
+    raise ValueError(f"Unsupported file extension: {suffix}")
+
+print(json.dumps({"format": suffix.lstrip("."), "sheets": sheets}, ensure_ascii=False, allow_nan=False))
+`;
+
+const CODEMODE_RUNTIME_HELPERS = String.raw`
+import csv
+import json
+import math
+import pathlib
+import zipfile
+import xml.etree.ElementTree as ET
+
+def cm_normalize_value(value):
+    if value is None:
+        return None
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        if value.is_integer():
+            return int(value)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+def cm_emit_extraction(payload):
+    print(json.dumps(payload, ensure_ascii=False, allow_nan=False))
+
+def cm_ods_cell_text(cell, ns):
+    values = []
+    for text_node in cell.findall(".//text:p", ns):
+        text = "".join(text_node.itertext()).strip()
+        if text:
+            values.append(text)
+    if values:
+        return "\n".join(values)
+    return cell.attrib.get(f"{{{ns['office']}}}value") or cell.attrib.get(f"{{{ns['office']}}}string-value") or ""
+
+def cm_iter_ods_rows(path, max_sheets=None, max_rows_per_sheet=None, max_cells_per_row=120):
+    ns = {
+        "office": "urn:oasis:names:tc:opendocument:xmlns:office:1.0",
+        "table": "urn:oasis:names:tc:opendocument:xmlns:table:1.0",
+        "text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0",
+    }
+    path = pathlib.Path(path)
+    sheet_count = 0
+    with zipfile.ZipFile(path) as archive:
+        with archive.open("content.xml") as handle:
+            for _, element in ET.iterparse(handle, events=("end",)):
+                if element.tag != f"{{{ns['table']}}}table":
+                    continue
+                sheet_count += 1
+                if max_sheets is not None and sheet_count > max_sheets:
+                    element.clear()
+                    break
+                sheet_name = element.attrib.get(f"{{{ns['table']}}}name", f"sheet_{sheet_count}")
+                yielded = 0
+                for row_index, row in enumerate(element.findall("table:table-row", ns), start=1):
+                    if max_rows_per_sheet is not None and yielded >= max_rows_per_sheet:
+                        break
+                    repeat_rows = int(row.attrib.get(f"{{{ns['table']}}}number-rows-repeated", "1") or "1")
+                    if repeat_rows > 1000:
+                        repeat_rows = 1
+                    row_values = []
+                    for cell in list(row):
+                        if cell.tag not in {
+                            f"{{{ns['table']}}}table-cell",
+                            f"{{{ns['table']}}}covered-table-cell",
+                        }:
+                            continue
+                        repeat_cols = int(cell.attrib.get(f"{{{ns['table']}}}number-columns-repeated", "1") or "1")
+                        if repeat_cols > 1000:
+                            repeat_cols = 1
+                        value = cm_ods_cell_text(cell, ns)
+                        for _ in range(repeat_cols):
+                            if len(row_values) >= max_cells_per_row:
+                                break
+                            row_values.append(value)
+                        if len(row_values) >= max_cells_per_row:
+                            break
+                    if any(str(value).strip() for value in row_values):
+                        for _ in range(repeat_rows):
+                            if max_rows_per_sheet is not None and yielded >= max_rows_per_sheet:
+                                break
+                            yielded += 1
+                            yield {
+                                "sheet_name": sheet_name,
+                                "source_row": row_index,
+                                "source_ref": f"{sheet_name}!row:{row_index}",
+                                "values": [cm_normalize_value(value) for value in row_values],
+                            }
+                element.clear()
+
+def cm_ods_rows_by_sheet(path, max_sheets=None, max_rows_per_sheet=None, max_cells_per_row=120):
+    sheets = {}
+    for row in cm_iter_ods_rows(path, max_sheets=max_sheets, max_rows_per_sheet=max_rows_per_sheet, max_cells_per_row=max_cells_per_row):
+        sheets.setdefault(row["sheet_name"], []).append(row)
+    return sheets
+
+def cm_detect_header_row(rows, min_filled=2, max_scan=25):
+    best_index = 0
+    best_score = -1
+    for index, row in enumerate(rows[:max_scan]):
+        values = row.get("values", row) if isinstance(row, dict) else row
+        filled = [str(value).strip() for value in values if str(value).strip()]
+        alpha = sum(1 for value in filled if any(char.isalpha() for char in value))
+        score = alpha * 2 + len(filled)
+        if len(filled) >= min_filled and score > best_score:
+            best_index = index
+            best_score = score
+    return best_index
+
+def cm_safe_column_name(value, fallback):
+    text = str(value or "").strip().lower()
+    out = []
+    previous_underscore = False
+    for char in text:
+        if char.isalnum():
+            out.append(char)
+            previous_underscore = False
+        elif not previous_underscore:
+            out.append("_")
+            previous_underscore = True
+    name = "".join(out).strip("_")[:64] or fallback
+    if name and name[0].isdigit():
+        name = f"c_{name}"
+    return name
+
+def cm_unique_columns(values):
+    counts = {}
+    columns = []
+    for index, value in enumerate(values):
+        base = cm_safe_column_name(value, f"column_{index + 1}")
+        count = counts.get(base, 0) + 1
+        counts[base] = count
+        columns.append(base if count == 1 else f"{base}_{count}")
+    return columns
+
+def cm_rows_to_records(rows, header_index=None, include_blank=False):
+    if not rows:
+        return []
+    if header_index is None:
+        header_index = cm_detect_header_row(rows)
+    header = rows[header_index].get("values", rows[header_index]) if isinstance(rows[header_index], dict) else rows[header_index]
+    columns = cm_unique_columns(header)
+    records = []
+    for row in rows[header_index + 1:]:
+        values = row.get("values", row) if isinstance(row, dict) else row
+        if not include_blank and not any(str(value).strip() for value in values):
+            continue
+        cells = {column: cm_normalize_value(values[index]) if index < len(values) else None for index, column in enumerate(columns)}
+        records.append({
+            "source_row": row.get("source_row", len(records) + 1) if isinstance(row, dict) else len(records) + 1,
+            "source_ref": row.get("source_ref", f"row:{len(records) + 1}") if isinstance(row, dict) else f"row:{len(records) + 1}",
+            "cells": cells,
+        })
+    return records
+
+def cm_unpivot_records(records, id_columns, variable_name="measure", value_name="value"):
+    output = []
+    id_set = set(id_columns)
+    for record in records:
+        cells = record.get("cells", {})
+        id_values = {column: cells.get(column) for column in id_columns}
+        for column, value in cells.items():
+            if column in id_set:
+                continue
+            output.append({
+                "source_row": record.get("source_row"),
+                "source_ref": record.get("source_ref"),
+                "cells": {**id_values, variable_name: column, value_name: value},
+            })
+    return output
+
+def cm_profile_rows(rows, max_scan=100):
+    non_empty = []
+    widths = {}
+    for row in rows[:max_scan]:
+        values = row.get("values", row) if isinstance(row, dict) else row
+        filled = sum(1 for value in values if str(value).strip())
+        if filled:
+            non_empty.append(filled)
+            widths[len(values)] = widths.get(len(values), 0) + 1
+    return {
+        "likely_header_index": cm_detect_header_row(rows[:max_scan]) if rows else 0,
+        "non_empty_rows_scanned": len(non_empty),
+        "max_filled_cells": max(non_empty) if non_empty else 0,
+        "width_histogram": widths,
+    }
+
+def cm_read_delimited_rows(path, delimiter=None, max_rows=None):
+    path = pathlib.Path(path)
+    if delimiter is None:
+        delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
+    rows = []
+    with open(path, newline="", encoding="utf-8-sig", errors="replace") as handle:
+        reader = csv.reader(handle, delimiter=delimiter)
+        for row_index, row in enumerate(reader, start=1):
+            rows.append({
+                "sheet_name": path.stem,
+                "source_row": row_index,
+                "source_ref": f"{path.name}:row {row_index}",
+                "values": [cm_normalize_value(value) for value in row],
+            })
+            if max_rows is not None and len(rows) >= max_rows:
+                break
+    return rows
+`;
+
+
+function normalizeJsonValue(value: unknown): string | number | boolean | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (value instanceof Date) return value.toISOString();
+  return JSON.stringify(value);
+}
+
+function normalizeCodemodeExtraction(value: unknown, filename: string): CodemodeExtraction {
+  const input = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const metadataInput = input.metadata && typeof input.metadata === "object" ? (input.metadata as Record<string, unknown>) : {};
+  const rawTables = Array.isArray(input.tables) ? input.tables : [];
+  const tables = rawTables.map((rawTable, tableIndex) => {
+    const table = rawTable && typeof rawTable === "object" ? (rawTable as Record<string, unknown>) : {};
+    const rawRows = Array.isArray(table.rows) ? table.rows : [];
+    const inferredColumns = new Set<string>();
+
+    for (const rawRow of rawRows) {
+      const row = rawRow && typeof rawRow === "object" ? (rawRow as Record<string, unknown>) : {};
+      const cells = row.cells && typeof row.cells === "object" ? (row.cells as Record<string, unknown>) : {};
+      for (const column of Object.keys(cells)) inferredColumns.add(column);
+    }
+
+    const listedColumns = Array.isArray(table.columns) ? table.columns : [];
+    const columns = [...listedColumns, ...[...inferredColumns].filter((column) => !listedColumns.includes(column))]
+      .map((column, columnIndex) => String(column || `column_${columnIndex + 1}`))
+      .filter(Boolean);
+
+    const rows = rawRows.map((rawRow, rowIndex) => {
+      const row = rawRow && typeof rawRow === "object" ? (rawRow as Record<string, unknown>) : {};
+      const cells = row.cells && typeof row.cells === "object" ? (row.cells as Record<string, unknown>) : {};
+      const sourceRow = typeof row.source_row === "number" && Number.isFinite(row.source_row) ? row.source_row : rowIndex + 1;
+      const normalizedCells: Record<string, string | number | boolean | null> = {};
+
+      for (const column of columns) {
+        normalizedCells[column] = normalizeJsonValue(cells[column]);
+      }
+
+      return {
+        cells: normalizedCells,
+        source_ref: typeof row.source_ref === "string" ? row.source_ref : `${table.name ?? `table_${tableIndex + 1}`}!row:${sourceRow}`,
+        source_row: sourceRow,
+      };
+    });
+
+    return {
+      columns,
+      name: typeof table.name === "string" && table.name.trim() ? table.name : `table_${tableIndex + 1}`,
+      rows,
+    };
+  });
+
+  const description =
+      typeof input.description === "string" && input.description.trim()
+        ? input.description
+        : typeof metadataInput.description === "string" && metadataInput.description.trim()
+          ? metadataInput.description
+          : `${filename} was analyzed in codemode into ${tables.length} table${tables.length === 1 ? "" : "s"}.`;
+  const metadata = {
+    category: typeof metadataInput.category === "string" && metadataInput.category.trim() ? metadataInput.category : "Uncategorised",
+    caveats: typeof metadataInput.caveats === "string" ? metadataInput.caveats : "",
+    confidence_score:
+      typeof metadataInput.confidence_score === "number" && Number.isFinite(metadataInput.confidence_score)
+        ? Math.max(0, Math.min(100, Math.round(metadataInput.confidence_score)))
+        : 75,
+    description,
+    dimensions:
+      metadataInput.dimensions && typeof metadataInput.dimensions === "object"
+        ? (metadataInput.dimensions as Record<string, unknown>)
+        : {},
+    domain: typeof metadataInput.domain === "string" && metadataInput.domain.trim() ? metadataInput.domain : "general",
+    extraction_notes: typeof metadataInput.extraction_notes === "string" ? metadataInput.extraction_notes : "",
+    geography: typeof metadataInput.geography === "string" ? metadataInput.geography : "",
+    measures:
+      metadataInput.measures && typeof metadataInput.measures === "object"
+        ? (metadataInput.measures as Record<string, unknown>)
+        : {},
+    source_summary: typeof metadataInput.source_summary === "string" ? metadataInput.source_summary : "",
+    time_period: typeof metadataInput.time_period === "string" ? metadataInput.time_period : "",
+    title:
+      typeof metadataInput.title === "string" && metadataInput.title.trim()
+        ? metadataInput.title
+        : filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "),
+    units: typeof metadataInput.units === "string" ? metadataInput.units : "",
+  };
+
+  return {
+    description,
+    filename: typeof input.filename === "string" ? input.filename : filename,
+    format: typeof input.format === "string" ? input.format : filename.split(".").pop()?.toLowerCase() ?? "unknown",
+    metadata,
+    tables,
+  };
+}
+
+
+function profileSummary(profile: unknown) {
+  if (typeof profile !== "object" || profile === null) return profile;
+  const record = profile as {
+    extension?: unknown;
+    filename?: unknown;
+    sheets?: unknown;
+    size_bytes?: unknown;
+  };
+  const sheets = Array.isArray(record.sheets)
+    ? record.sheets.map((sheet) => {
+        if (typeof sheet !== "object" || sheet === null) return sheet;
+        const typedSheet = sheet as {
+          columns_seen?: unknown;
+          delimiter?: unknown;
+          name?: unknown;
+          parser?: unknown;
+          rows_seen?: unknown;
+        };
+        return {
+          columns_seen: typedSheet.columns_seen,
+          delimiter: typedSheet.delimiter,
+          name: typedSheet.name,
+          parser: typedSheet.parser,
+          rows_seen: typedSheet.rows_seen,
+        };
+      })
+    : [];
+  return {
+    extension: record.extension,
+    filename: record.filename,
+    sheets,
+    size_bytes: record.size_bytes,
+  };
+}
+
+function compactProfile(profile: unknown) {
+  if (typeof profile !== "object" || profile === null) return profile;
+  const record = profile as {
+    extension?: unknown;
+    filename?: unknown;
+    sheets?: unknown;
+    size_bytes?: unknown;
+  };
+  const sheets = Array.isArray(record.sheets)
+    ? record.sheets.slice(0, 16).map((sheet) => {
+        if (typeof sheet !== "object" || sheet === null) return sheet;
+        const typedSheet = sheet as {
+          columns_seen?: unknown;
+          delimiter?: unknown;
+          name?: unknown;
+          parser?: unknown;
+          rows_seen?: unknown;
+          sample?: unknown;
+        };
+        const sampleRows = Array.isArray(typedSheet.sample) ? typedSheet.sample : [];
+        const usefulRows = sampleRows
+          .filter((row) => Array.isArray(row) && row.some((cell) => String(cell ?? "").trim()))
+          .slice(0, 8)
+          .map((row) =>
+            Array.isArray(row)
+              ? row.slice(0, 18).map((cell) => {
+                  const text = String(cell ?? "");
+                  return text.length > 120 ? `${text.slice(0, 120)}...` : text;
+                })
+              : row,
+          );
+        const widths = sampleRows.reduce<Record<string, number>>((counts, row) => {
+          const width = Array.isArray(row) ? row.filter((cell) => String(cell ?? "").trim()).length : 0;
+          if (width) counts[String(width)] = (counts[String(width)] ?? 0) + 1;
+          return counts;
+        }, {});
+        return {
+          columns_seen: typedSheet.columns_seen,
+          delimiter: typedSheet.delimiter,
+          name: typedSheet.name,
+          parser: typedSheet.parser,
+          rows_seen: typedSheet.rows_seen,
+          useful_sample: usefulRows,
+          width_histogram: widths,
+        };
+      })
+    : [];
+  return {
+    extension: record.extension,
+    filename: record.filename,
+    sheets,
+    size_bytes: record.size_bytes,
+  };
+}
+
+function extractionTableSummary(extraction: CodemodeExtraction) {
+  return extraction.tables.map((table) => ({
+    columns: table.columns.slice(0, 12),
+    name: table.name,
+    row_count: table.rows.length,
+  }));
+}
+
+
 
 export class SheetsThink extends Think<Env> {
   private fileSchemaReady = false;
@@ -85,7 +827,7 @@ export class SheetsThink extends Think<Env> {
         ? "For questions about the data, first call describe_spreadsheet_database, then query_spreadsheet_database. Use execute_python only when SQL is insufficient or the user asks for code/Python."
         : "For questions about the data, use execute_python first to inspect the raw spreadsheet file at SPREADSHEET_PATH. Do not assume pre-extracted SQL tables exist.",
       "For questions about upload history, edits, versions, or revisions, call list_spreadsheet_revisions.",
-      "Use robust CSV/TSV parsing: sniff delimiters, prefer pandas.read_csv(..., engine='python', on_bad_lines='skip', encoding='utf-8-sig') when using pandas, and fall back to csv.reader for ragged files. Use pandas.read_excel for XLSX/XLS, pandas.read_excel(..., engine='odf') for ODS, and pandas.read_xml or lxml/ElementTree for XML.",
+      "Use robust CSV/TSV parsing: sniff delimiters, prefer pandas.read_csv(..., engine='python', on_bad_lines='skip', encoding='utf-8-sig') when using pandas, and fall back to csv.reader for ragged files. Use pandas/openpyxl for XLSX/XLS when useful. For ODS, avoid pandas/odf in constrained sandboxes and prefer lightweight zip/content.xml parsing. Use pandas.read_xml or lxml/ElementTree for XML.",
       "When citing values, include the source_ref/source_row from the generated database where possible.",
       "Keep answers concise, concrete, and useful.",
     ].join("\n");
@@ -669,7 +1411,7 @@ export class SheetsThink extends Think<Env> {
       title: "Running extraction code",
     });
     const extractionResult = await sandbox.exec(
-      `python3 - <<'PY'\nSPREADSHEET_PATH = ${JSON.stringify(sandboxPath)}\n${code}\nPY`,
+      `python3 - <<'PY'\nSPREADSHEET_PATH = ${JSON.stringify(sandboxPath)}\n${CODEMODE_RUNTIME_HELPERS}\n${code}\nPY`,
       { timeout: 120_000 },
     );
 
@@ -683,9 +1425,25 @@ export class SheetsThink extends Think<Env> {
       });
       throw new Error(extractionResult.stderr || "Codemode spreadsheet extraction failed.");
     }
+    if (extractionResult.stdout.length > 8_000_000) {
+      this.recordTrace({
+        detail: traceDetail("The generated extraction output was too large for a single JSON import.", {
+          bytes: extractionResult.stdout.length,
+          limit: 8_000_000,
+        }),
+        durationMs: Date.now() - extractionStartedAt,
+        spanType: "ingestion",
+        status: "error",
+        title: "Extraction output too large",
+      });
+      throw new Error("Extraction output is too large. Generate fewer audit rows or more compact semantic tables.");
+    }
 
     this.recordTrace({
-      detail: traceDetail("The generated extraction code produced JSON for the document database.", extractionResult.stdout),
+      detail: traceDetail("The generated extraction code produced JSON for the document database.", {
+        bytes: extractionResult.stdout.length,
+        preview: extractionResult.stdout.slice(0, 2000),
+      }),
       durationMs: Date.now() - extractionStartedAt,
       spanType: "ingestion",
       status: "done",
@@ -812,6 +1570,7 @@ export class SheetsThink extends Think<Env> {
     `;
 
     extraction.tables.forEach((table, tableIndex) => {
+      const startedAt = Date.now();
       const tableName = this.safeSqlIdentifier(`doc_${tableIndex + 1}_${table.name}`);
       const uniqueColumns = this.uniqueSqlColumns(table.columns.filter((column) => !["source_row", "source_ref"].includes(column.toLowerCase())));
       const columnDefs = uniqueColumns.map((column) => `${this.quoteIdentifier(column)} TEXT`).join(", ");
@@ -838,6 +1597,18 @@ export class SheetsThink extends Think<Env> {
         INSERT INTO document_tables (spreadsheet_id, table_name, source_name, columns_json, row_count)
         VALUES (${spreadsheetId}, ${tableName}, ${table.name}, ${JSON.stringify(uniqueColumns)}, ${table.rows.length})
       `;
+      this.recordTrace({
+        detail: traceDetail("Imported one generated table into the agent SQLite database.", {
+          columns: uniqueColumns.slice(0, 20),
+          rowCount: table.rows.length,
+          sourceName: table.name,
+          tableName,
+        }),
+        durationMs: Date.now() - startedAt,
+        spanType: "ingestion",
+        status: "done",
+        title: `Imported table ${tableName}`,
+      });
     });
   }
 
@@ -853,8 +1624,8 @@ export class SheetsThink extends Think<Env> {
       "The JSON shape must be:",
       '{"metadata": {"title": string, "description": string, "category": string, "domain": string, "geography": string, "time_period": string, "units": string, "measures": object, "dimensions": object, "caveats": string, "source_summary": string, "extraction_notes": string, "confidence_score": number}, "tables": [{"name": string, "purpose": string, "grain": string, "columns": [{"name": string, "meaning": string}], "source_strategy": string}]}',
       `Filename: ${filename}`,
-      "Inspection profile:",
-      JSON.stringify(profile, null, 2),
+      "Compact inspection profile:",
+      JSON.stringify(compactProfile(profile), null, 2),
     ].join("\n\n");
 
     const entries = configuredModelEntries(this.env);
@@ -867,7 +1638,7 @@ export class SheetsThink extends Think<Env> {
         this.recordTrace({
           detail: traceDetail("Asking the model to design semantic tables and document metadata before code is written.", {
             model: label,
-            profile: profileSummary(profile),
+            profile: compactProfile(profile),
           }),
           spanType: "ingestion",
           status: "running",
@@ -909,12 +1680,48 @@ export class SheetsThink extends Think<Env> {
     throw lastError instanceof Error ? lastError : new Error("Failed to design codemode extraction.");
   }
 
-  private async generateCodemodeExtractionCode(filename: string, profile: unknown, design: unknown) {
-    const prompt = [
+  private codemodeCodeProblem(filename: string, code: string) {
+    const lowerName = filename.toLowerCase();
+    const lowerCode = code.toLowerCase();
+    if (lowerName.endsWith(".ods")) {
+      const forbidden = [
+        "import pandas",
+        "from pandas",
+        "read_excel",
+        "engine='odf'",
+        'engine="odf"',
+        "import numpy",
+        "from numpy",
+        "import odf",
+        "from odf",
+      ];
+      const match = forbidden.find((item) => lowerCode.includes(item));
+      if (match) {
+        return `ODS extractors must not use pandas/numpy/odf/read_excel because they exceed sandbox memory. Found forbidden code: ${match}. Use cm_ods_rows_by_sheet or cm_iter_ods_rows instead.`;
+      }
+    }
+    const lineCount = code.split(/\r?\n/).length;
+    if (lineCount > 260) {
+      return `Generated extraction code is too large (${lineCount} lines). Keep it under 260 lines by composing cm_* helpers instead of writing generic parser infrastructure.`;
+    }
+    if (code.length > 24_000) {
+      return `Generated extraction code is too large (${code.length} chars). Keep it under 24000 chars by composing cm_* helpers.`;
+    }
+    return null;
+  }
+
+  private codemodeExtractionPrompt(filename: string, profile: unknown, design: unknown, previousProblem?: string) {
+    return [
       "You are in codemode. Generate a complete Python script that reads the uploaded spreadsheet at SPREADSHEET_PATH and prints one JSON object to stdout.",
       "Do not explain the code. Return only Python code, with no markdown fences.",
       "The variable SPREADSHEET_PATH is already defined as the absolute sandbox path. You must read from SPREADSHEET_PATH, not from the filename and not from the current working directory.",
       "Start by assigning path = pathlib.Path(SPREADSHEET_PATH) or Path(SPREADSHEET_PATH), and use that path variable for every file read.",
+      "A trusted helper prelude is already loaded before your script. Reuse these helpers instead of reimplementing generic parsers:",
+      "- cm_ods_rows_by_sheet(path, max_sheets=None, max_rows_per_sheet=None, max_cells_per_row=120): memory-safe ODS row extraction from content.xml.",
+      "- cm_iter_ods_rows(path, ...): streaming-style ODS rows with sheet_name, source_row, source_ref, values.",
+      "- cm_read_delimited_rows(path, delimiter=None, max_rows=None): CSV/TSV rows with provenance.",
+      "- cm_normalize_value(value) and cm_emit_extraction(payload).",
+      "- cm_detect_header_row(rows), cm_rows_to_records(rows, header_index=None), cm_unpivot_records(records, id_columns, variable_name='measure', value_name='value'), and cm_profile_rows(rows).",
       "The script must implement the semantic extraction design below, not simply mirror spreadsheet columns unless the design explicitly says to.",
       "The script must print this exact JSON shape:",
       '{"description": string, "filename": string, "format": string, "metadata": {"title": string, "description": string, "category": string, "domain": string, "geography": string, "time_period": string, "units": string, "measures": object, "dimensions": object, "caveats": string, "source_summary": string, "extraction_notes": string, "confidence_score": number}, "tables": [{"name": string, "columns": string[], "rows": [{"source_row": number, "source_ref": string, "cells": object}]}]}',
@@ -923,69 +1730,96 @@ export class SheetsThink extends Think<Env> {
       "- Preserve all meaningful spreadsheet/XML/CSV data, either in semantic tables or an audit/source table if needed.",
       "- Include source_row and source_ref for every extracted row so answers can point back to the original document.",
       "- Include a metadata table worth of content in the metadata object: category, domain, measures, dimensions, units, geography, time period, caveats, source summary, and extraction notes.",
-      "- Use pandas for xlsx/xls/ods when useful. Use ElementTree or lxml for XML.",
+      "- For ODS files, you MUST use cm_ods_rows_by_sheet or cm_iter_ods_rows. Do not import pandas, numpy, odf, or call read_excel for ODS.",
+      "- For XLSX/XLS files, pandas or openpyxl are allowed when useful.",
       "- For CSV/TSV, expect messy real-world files: metadata rows, inconsistent column counts, BOMs, quoted delimiters, blank lines, and semicolon/pipe/tab/comma delimiters.",
       "- For CSV/TSV, sniff the delimiter with csv.Sniffer over a large sample when possible. If using pandas.read_csv, prefer engine='python', dtype=object, keep_default_na=False, encoding='utf-8-sig', and on_bad_lines='skip'.",
       "- If pandas.read_csv raises ParserError or UnicodeDecodeError, fall back to Python csv.reader with encoding='utf-8-sig', errors='replace', preserving row numbers and padding ragged rows instead of failing.",
       "- Normalize NaN, Infinity, pandas.NA, timestamps, decimals, and numpy values into valid JSON values.",
       "- Print with json.dumps(..., ensure_ascii=False, allow_nan=False).",
       "- Never print Python dict reprs, comments, logs, warnings, or NaN tokens.",
+      "- Keep the script under 260 lines. Compose helpers; do not write generic parsing frameworks.",
+      previousProblem ? `Previous generated code was rejected: ${previousProblem}` : "",
       `Filename: ${filename}`,
-      "Inspection profile:",
-      JSON.stringify(profile, null, 2),
+      "Compact inspection profile:",
+      JSON.stringify(compactProfile(profile), null, 2),
       "Semantic extraction design:",
       JSON.stringify(design, null, 2),
-    ].join("\n\n");
+    ].filter(Boolean).join("\n\n");
+  }
+
+  private async generateCodemodeExtractionCode(filename: string, profile: unknown, design: unknown) {
 
     const entries = configuredModelEntries(this.env);
     let lastError: unknown;
+    let previousProblem: string | undefined;
 
     for (const entry of entries) {
       const label = `${entry.provider}:${entry.model}`;
-      const startedAt = Date.now();
-      try {
-        this.recordTrace({
-          detail: traceDetail("Asking the configured model to write a robust Python extractor for this document shape.", {
-            model: label,
-            profile: profileSummary(profile),
-          }),
-          spanType: "ingestion",
-          status: "running",
-          title: "Generating extraction code",
-        });
-        const model =
-          entry.provider.toLowerCase() === "workers-ai"
-            ? createWorkersAI({ binding: this.env.AI })(entry.model)
-            : this.getGatewayModel([entry]);
-        const result = await generateText({
-          model,
-          prompt,
-          temperature: 0,
-        });
-        const code = stripCodeFence(result.text);
-        this.recordTrace({
-          detail: traceDetail("The model returned executable Python code for the sandbox.", {
-            code,
-            model: label,
-          }),
-          durationMs: Date.now() - startedAt,
-          spanType: "ingestion",
-          status: "done",
-          title: "Extraction code generated",
-        });
-        return code;
-      } catch (error) {
-        lastError = error;
-        this.recordTrace({
-          detail: traceDetail(
-            "This model failed to generate extraction code. The fallback chain will continue if another model is configured.",
-            error instanceof Error ? { message: error.message, model: label } : { error, model: label },
-          ),
-          durationMs: Date.now() - startedAt,
-          spanType: "ingestion",
-          status: "error",
-          title: "Extraction code generation failed",
-        });
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const startedAt = Date.now();
+        try {
+          this.recordTrace({
+            detail: traceDetail("Asking the configured model to write a lean Python extractor for this document shape.", {
+              attempt,
+              model: label,
+              profile: compactProfile(profile),
+              previousProblem,
+            }),
+            spanType: "ingestion",
+            status: "running",
+            title: "Generating extraction code",
+          });
+          const model =
+            entry.provider.toLowerCase() === "workers-ai"
+              ? createWorkersAI({ binding: this.env.AI })(entry.model)
+              : this.getGatewayModel([entry]);
+          const result = await generateText({
+            model,
+            prompt: this.codemodeExtractionPrompt(filename, profile, design, previousProblem),
+            temperature: 0,
+          });
+          const code = stripCodeFence(result.text);
+          const problem = this.codemodeCodeProblem(filename, code);
+          if (problem) {
+            previousProblem = problem;
+            lastError = new Error(problem);
+            this.recordTrace({
+              detail: traceDetail("The generated extraction code used a memory-heavy parser and was rejected before sandbox execution.", {
+                code,
+                problem,
+              }),
+              durationMs: Date.now() - startedAt,
+              spanType: "ingestion",
+              status: "error",
+              title: "Extraction code rejected",
+            });
+            continue;
+          }
+          this.recordTrace({
+            detail: traceDetail("The model returned executable Python code for the sandbox.", {
+              code,
+              model: label,
+            }),
+            durationMs: Date.now() - startedAt,
+            spanType: "ingestion",
+            status: "done",
+            title: "Extraction code generated",
+          });
+          return code;
+        } catch (error) {
+          lastError = error;
+          this.recordTrace({
+            detail: traceDetail(
+              "This model failed to generate extraction code. The fallback chain will continue if another model is configured.",
+              error instanceof Error ? { message: error.message, model: label } : { error, model: label },
+            ),
+            durationMs: Date.now() - startedAt,
+            spanType: "ingestion",
+            status: "error",
+            title: "Extraction code generation failed",
+          });
+        }
       }
     }
 
@@ -1001,7 +1835,7 @@ export class SheetsThink extends Think<Env> {
       "Reward semantic tables with clear grain and provenance. Penalize spreadsheet mirroring when better domain tables were possible.",
       `Filename: ${filename}`,
       "Inspection profile:",
-      JSON.stringify(profileSummary(profile), null, 2),
+      JSON.stringify(compactProfile(profile), null, 2),
       "Semantic design:",
       JSON.stringify(design, null, 2),
       "Extraction summary:",
@@ -1413,4 +2247,3 @@ export class SheetsThink extends Think<Env> {
     this.broadcast(JSON.stringify({ trace, type: "agent_trace" }));
   }
 }
-
