@@ -21,6 +21,7 @@ type SpreadsheetRow = {
   content_type: string;
   size_bytes: number;
   agent_name: string;
+  sandbox_path: string | null;
   uploaded_at: string;
 };
 
@@ -32,10 +33,29 @@ const DEFAULT_SCRIPT = [
   "print('utc =', datetime.utcnow().isoformat(timespec='seconds'))",
 ].join("\n");
 
-async function runPython(env: Env, code = DEFAULT_SCRIPT) {
-  const sandbox = getSandbox(env.Sandbox, "hackathon-python");
-  const result = await sandbox.exec(`python3 - <<'PY'\n${code}\nPY`, {
-    timeout: 15_000,
+function arrayBufferToBase64(buffer: ArrayBuffer) {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  for (let index = 0; index < bytes.length; index += 1) {
+    binary += String.fromCharCode(bytes[index]);
+  }
+  return btoa(binary);
+}
+
+async function runPython(env: Env, code = DEFAULT_SCRIPT, spreadsheet?: SpreadsheetRow | null) {
+  const sandboxId = spreadsheet ? `sandbox-${spreadsheet.id}` : "hackathon-python";
+  const sandbox = getSandbox(env.Sandbox, sandboxId);
+  const prelude = spreadsheet?.sandbox_path
+    ? [
+        "import os",
+        `SPREADSHEET_PATH = ${JSON.stringify(spreadsheet.sandbox_path)}`,
+        `SPREADSHEET_FILENAME = ${JSON.stringify(spreadsheet.filename)}`,
+        "os.environ['SPREADSHEET_PATH'] = SPREADSHEET_PATH",
+        "",
+      ].join("\n")
+    : "";
+  const result = await sandbox.exec(`python3 - <<'PY'\n${prelude}${code}\nPY`, {
+    timeout: 30_000,
   });
 
   return {
@@ -61,6 +81,14 @@ function agentNameForSpreadsheet(id: string) {
   return `spreadsheet-${id}`;
 }
 
+function spreadsheetIdFromAgentName(agentName: string) {
+  return agentName.startsWith("spreadsheet-") ? agentName.slice("spreadsheet-".length) : null;
+}
+
+function safeFilename(filename: string) {
+  return filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
 function isSpreadsheetFile(file: File) {
   const name = file.name.toLowerCase();
   return (
@@ -74,7 +102,7 @@ function isSpreadsheetFile(file: File) {
 async function listSpreadsheets(env: Env) {
   const { results } = await env.DB.prepare(
     [
-      "SELECT id, filename, content_type, size_bytes, agent_name, uploaded_at",
+      "SELECT id, filename, content_type, size_bytes, agent_name, sandbox_path, uploaded_at",
       "FROM spreadsheets",
       "ORDER BY uploaded_at DESC",
     ].join(" "),
@@ -84,9 +112,15 @@ async function listSpreadsheets(env: Env) {
 }
 
 async function getSpreadsheet(env: Env, id: string) {
+  const spreadsheet = await getSpreadsheetRow(env, id);
+  if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+  return json({ spreadsheet });
+}
+
+async function getSpreadsheetRow(env: Env, id: string) {
   const spreadsheet = await env.DB.prepare(
     [
-      "SELECT id, filename, content_type, size_bytes, agent_name, uploaded_at",
+      "SELECT id, filename, content_type, size_bytes, agent_name, sandbox_path, uploaded_at",
       "FROM spreadsheets",
       "WHERE id = ?",
     ].join(" "),
@@ -94,8 +128,7 @@ async function getSpreadsheet(env: Env, id: string) {
     .bind(id)
     .first<SpreadsheetRow>();
 
-  if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
-  return json({ spreadsheet });
+  return spreadsheet;
 }
 
 async function uploadSpreadsheet(request: Request, env: Env) {
@@ -112,15 +145,22 @@ async function uploadSpreadsheet(request: Request, env: Env) {
 
   const id = crypto.randomUUID();
   const agentName = agentNameForSpreadsheet(id);
+  const sandboxPath = `/workspace/spreadsheets/${id}/${safeFilename(file.name)}`;
+  const sandbox = getSandbox(env.Sandbox, `sandbox-${id}`);
+
+  await sandbox.mkdir(`/workspace/spreadsheets/${id}`, { recursive: true });
+  await sandbox.writeFile(sandboxPath, arrayBufferToBase64(await file.arrayBuffer()), {
+    encoding: "base64",
+  });
 
   await env.DB.prepare(
     [
       "INSERT INTO spreadsheets",
-      "(id, filename, content_type, size_bytes, agent_name)",
-      "VALUES (?, ?, ?, ?, ?)",
+      "(id, filename, content_type, size_bytes, agent_name, sandbox_path)",
+      "VALUES (?, ?, ?, ?, ?, ?)",
     ].join(" "),
   )
-    .bind(id, file.name, file.type || "application/octet-stream", file.size, agentName)
+    .bind(id, file.name, file.type || "application/octet-stream", file.size, agentName, sandboxPath)
     .run();
 
   return json(
@@ -131,6 +171,7 @@ async function uploadSpreadsheet(request: Request, env: Env) {
         content_type: file.type || "application/octet-stream",
         size_bytes: file.size,
         agent_name: agentName,
+        sandbox_path: sandboxPath,
       },
     },
     { status: 201 },
@@ -146,8 +187,9 @@ export class HackathonAgent extends Think<Env> {
     return [
       "You are a practical hackathon coding assistant.",
       "You are scoped to one uploaded spreadsheet when your agent name starts with spreadsheet-.",
-      "The spreadsheet metadata lives in D1 and the browser selects the retained agent for that spreadsheet.",
-      "When the user asks to run Python, use execute_python and explain the result briefly.",
+      "The uploaded spreadsheet is stored on disk in that spreadsheet's Cloudflare Sandbox.",
+      "When the user asks about the data, write Python for execute_python. The tool provides SPREADSHEET_PATH and SPREADSHEET_FILENAME.",
+      "Use pandas for CSV/TSV. For XLSX/XLS, try pandas.read_excel first.",
       "Keep answers concise, concrete, and useful.",
     ].join("\n");
   }
@@ -155,11 +197,16 @@ export class HackathonAgent extends Think<Env> {
   getTools() {
     return {
       execute_python: tool({
-        description: "Execute a short Python script inside a Cloudflare Sandbox container.",
+        description:
+          "Execute Python inside this spreadsheet's Cloudflare Sandbox. SPREADSHEET_PATH is available when the agent is attached to a spreadsheet.",
         inputSchema: z.object({
           code: z.string().min(1).describe("Python source code to run."),
         }),
-        execute: async ({ code }) => runPython(this.env, code),
+        execute: async ({ code }) => {
+          const spreadsheetId = spreadsheetIdFromAgentName(this.name);
+          const spreadsheet = spreadsheetId ? await getSpreadsheetRow(this.env, spreadsheetId) : null;
+          return runPython(this.env, code, spreadsheet);
+        },
       }),
     };
   }
@@ -190,6 +237,18 @@ export default {
 
     if (url.pathname === "/api/spreadsheets" && request.method === "POST") {
       return uploadSpreadsheet(request, env);
+    }
+
+    const spreadsheetRunMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/run-python$/);
+    if (spreadsheetRunMatch && request.method === "POST") {
+      const spreadsheet = await getSpreadsheetRow(env, spreadsheetRunMatch[1]);
+      if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+      const body = (await request.json().catch(() => ({}))) as { code?: unknown };
+      const code =
+        typeof body.code === "string" && body.code.trim()
+          ? body.code
+          : "print(open(SPREADSHEET_PATH, 'r', encoding='utf-8').read())";
+      return json(await runPython(env, code, spreadsheet));
     }
 
     const spreadsheetMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)$/);
