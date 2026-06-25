@@ -48,6 +48,11 @@ type AgentTraceResponse = {
   traces: AgentTrace[];
 };
 
+type AgentTraceMessage = {
+  type: "agent_trace";
+  trace: AgentTrace;
+};
+
 function textFromParts(parts: Array<{ type: string; text?: string }>) {
   return parts
     .filter((part) => part.type === "text")
@@ -71,6 +76,16 @@ function formatTraceDetail(detail: string | null) {
   } catch {
     return detail;
   }
+}
+
+function isAgentTraceMessage(value: unknown): value is AgentTraceMessage {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "type" in value &&
+    value.type === "agent_trace" &&
+    "trace" in value
+  );
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -308,9 +323,23 @@ function ChatSurface({
   setInput: (value: string) => void;
   spreadsheet: Spreadsheet;
 }) {
-  const agent = useAgent({ agent: "HackathonAgent", name: spreadsheet.agent_name });
-  const { messages, sendMessage, status } = useAgentChat({ agent });
   const [traces, setTraces] = useState<AgentTrace[]>([]);
+  const agent = useAgent({
+    agent: "HackathonAgent",
+    name: spreadsheet.agent_name,
+    onMessage: (event) => {
+      if (typeof event.data !== "string") return;
+
+      try {
+        const message = JSON.parse(event.data) as unknown;
+        if (!isAgentTraceMessage(message)) return;
+        setTraces((current) => [...current.filter((trace) => trace.id !== message.trace.id), message.trace].slice(-30));
+      } catch {
+        return;
+      }
+    },
+  });
+  const { messages, sendMessage, status } = useAgentChat({ agent });
   const isBusy = status === "submitted" || status === "streaming";
 
   const visibleMessages = useMemo(
@@ -320,26 +349,19 @@ function ChatSurface({
 
   useEffect(() => {
     let isMounted = true;
-    let timeout: number | undefined;
 
-    async function loadTraces() {
-      try {
-        const data = await fetchJson<AgentTraceResponse>(`/api/spreadsheets/${spreadsheet.id}/traces`);
+    fetchJson<AgentTraceResponse>(`/api/spreadsheets/${spreadsheet.id}/traces`)
+      .then((data) => {
         if (isMounted) setTraces(data.traces);
-      } finally {
-        if (isMounted) {
-          timeout = window.setTimeout(loadTraces, isBusy ? 900 : 3000);
-        }
-      }
-    }
-
-    loadTraces();
+      })
+      .catch(() => {
+        if (isMounted) setTraces([]);
+      });
 
     return () => {
       isMounted = false;
-      if (timeout) window.clearTimeout(timeout);
     };
-  }, [isBusy, spreadsheet.id]);
+  }, [spreadsheet.id]);
 
   function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

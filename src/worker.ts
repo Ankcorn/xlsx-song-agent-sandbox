@@ -35,6 +35,18 @@ type TraceInput = {
   title: string;
 };
 
+type AgentTraceEvent = {
+  id: string;
+  request_id: string | null;
+  span_type: string;
+  title: string;
+  status: "running" | "done" | "error";
+  detail: string | null;
+  step_number: number | null;
+  duration_ms: number | null;
+  created_at: string;
+};
+
 const DEFAULT_SCRIPT = [
   "from datetime import datetime",
   "numbers = [3, 5, 8, 13]",
@@ -379,6 +391,18 @@ export class HackathonAgent extends Think<Env> {
 
   private recordTrace(input: TraceInput) {
     this.ensureTraceSchema();
+    const trace: AgentTraceEvent = {
+      id: crypto.randomUUID(),
+      request_id: input.requestId ?? null,
+      span_type: input.spanType,
+      title: input.title,
+      status: input.status,
+      detail: safeTraceDetail(input.detail),
+      step_number: input.stepNumber ?? null,
+      duration_ms: input.durationMs ?? null,
+      created_at: new Date().toISOString(),
+    };
+
     this.sql`
       INSERT INTO agent_traces (
         id,
@@ -388,19 +412,22 @@ export class HackathonAgent extends Think<Env> {
         status,
         detail,
         step_number,
-        duration_ms
+        duration_ms,
+        created_at
       )
       VALUES (
-        ${crypto.randomUUID()},
-        ${input.requestId ?? null},
-        ${input.spanType},
-        ${input.title},
-        ${input.status},
-        ${safeTraceDetail(input.detail)},
-        ${input.stepNumber ?? null},
-        ${input.durationMs ?? null}
+        ${trace.id},
+        ${trace.request_id},
+        ${trace.span_type},
+        ${trace.title},
+        ${trace.status},
+        ${trace.detail},
+        ${trace.step_number},
+        ${trace.duration_ms},
+        ${trace.created_at}
       )
     `;
+    this.broadcast(JSON.stringify({ trace, type: "agent_trace" }));
   }
 }
 
