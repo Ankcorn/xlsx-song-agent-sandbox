@@ -1,6 +1,9 @@
 import { getSandbox, proxyToSandbox, type Sandbox as SandboxType } from "@cloudflare/sandbox";
 import { Think } from "@cloudflare/think";
 import { routeAgentRequest } from "agents";
+import { createAiGateway } from "ai-gateway-provider";
+import { createAnthropic } from "ai-gateway-provider/providers/anthropic";
+import { createOpenAI } from "ai-gateway-provider/providers/openai";
 import { generateText, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
@@ -9,6 +12,10 @@ export { Sandbox } from "@cloudflare/sandbox";
 
 type Env = {
   AI: Ai;
+  AI_GATEWAY_FALLBACKS?: string;
+  AI_GATEWAY_ID?: string;
+  AI_GATEWAY_MODEL?: string;
+  AI_GATEWAY_PROVIDER?: string;
   ASSETS: Fetcher;
   DB: D1Database;
   HackathonAgent: DurableObjectNamespace<HackathonAgent>;
@@ -343,6 +350,41 @@ function normalizeCodemodeExtraction(value: unknown, filename: string): Codemode
   };
 }
 
+function configuredModelEntries(env: Env) {
+  const fallbackEntries = env.AI_GATEWAY_FALLBACKS?.split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  if (fallbackEntries?.length) {
+    return fallbackEntries.map((entry) => {
+      const separator = entry.indexOf(":");
+      if (separator < 1) return { model: entry, provider: env.AI_GATEWAY_PROVIDER ?? "openai" };
+      return {
+        model: entry.slice(separator + 1).trim(),
+        provider: entry.slice(0, separator).trim(),
+      };
+    });
+  }
+
+  return [
+    {
+      model: env.AI_GATEWAY_MODEL ?? "@cf/moonshotai/kimi-k2.7-code",
+      provider: env.AI_GATEWAY_PROVIDER ?? "workers-ai",
+    },
+  ];
+}
+
+function providerModel(providerName: string, modelId: string) {
+  const provider = providerName.toLowerCase();
+
+  if (provider === "anthropic") return createAnthropic()(modelId);
+  if (provider === "openai") return createOpenAI().chat(modelId);
+
+  throw new Error(
+    `Unsupported AI_GATEWAY_PROVIDER "${providerName}". Use workers-ai, openai, or anthropic.`,
+  );
+}
+
 function agentNameForSpreadsheet(id: string) {
   return `spreadsheet-${id}`;
 }
@@ -597,7 +639,26 @@ export class HackathonAgent extends Think<Env> {
   private turnStartTimes = new Map<string, number>();
 
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.7-code");
+    const entries = configuredModelEntries(this.env);
+    if (entries.every((entry) => entry.provider.toLowerCase() === "workers-ai")) {
+      return createWorkersAI({ binding: this.env.AI })(entries[0]?.model ?? "@cf/moonshotai/kimi-k2.7-code");
+    }
+
+    const gateway = createAiGateway({
+      binding: this.env.AI.gateway(this.env.AI_GATEWAY_ID ?? "default"),
+      options: {
+        collectLog: true,
+        requestTimeoutMs: 120_000,
+        retries: {
+          backoff: "exponential",
+          maxAttempts: 3,
+          retryDelayMs: 750,
+        },
+        skipCache: true,
+      },
+    });
+
+    return gateway(entries.map((entry) => providerModel(entry.provider, entry.model)));
   }
 
   getSystemPrompt() {
