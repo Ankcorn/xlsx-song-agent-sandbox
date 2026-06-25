@@ -640,8 +640,17 @@ export class HackathonAgent extends Think<Env> {
 
   getModel() {
     const entries = configuredModelEntries(this.env);
-    if (entries.every((entry) => entry.provider.toLowerCase() === "workers-ai")) {
+    if (entries[0]?.provider.toLowerCase() === "workers-ai") {
       return createWorkersAI({ binding: this.env.AI })(entries[0]?.model ?? "@cf/moonshotai/kimi-k2.7-code");
+    }
+
+    return this.getGatewayModel(entries);
+  }
+
+  private getGatewayModel(entries: Array<{ model: string; provider: string }>) {
+    const gatewayEntries = entries.filter((entry) => entry.provider.toLowerCase() !== "workers-ai");
+    if (!gatewayEntries.length) {
+      throw new Error("No AI Gateway model configured.");
     }
 
     const gateway = createAiGateway({
@@ -658,7 +667,7 @@ export class HackathonAgent extends Think<Env> {
       },
     });
 
-    return gateway(entries.map((entry) => providerModel(entry.provider, entry.model)));
+    return gateway(gatewayEntries.map((entry) => providerModel(entry.provider, entry.model)));
   }
 
   getSystemPrompt() {
@@ -1121,31 +1130,69 @@ export class HackathonAgent extends Think<Env> {
   }
 
   private async generateCodemodeExtractionCode(filename: string, profile: unknown) {
-    const result = await generateText({
-      model: this.getModel(),
-      prompt: [
-        "You are in codemode. Generate a complete Python script that reads the uploaded spreadsheet at SPREADSHEET_PATH and prints one JSON object to stdout.",
-        "Do not explain the code. Return only Python code, with no markdown fences.",
-        "The variable SPREADSHEET_PATH is already defined as the absolute sandbox path. You must read from SPREADSHEET_PATH, not from the filename and not from the current working directory.",
-        "Start by assigning path = pathlib.Path(SPREADSHEET_PATH) or Path(SPREADSHEET_PATH), and use that path variable for every file read.",
-        "The script must dynamically extract the spreadsheet into this exact JSON shape:",
-        '{"description": string, "filename": string, "format": string, "tables": [{"name": string, "columns": string[], "rows": [{"source_row": number, "source_ref": string, "cells": object}]}]}',
-        "Rules:",
-        "- Preserve all meaningful spreadsheet/XML/CSV data.",
-        "- Include source_row and source_ref for every extracted row so answers can point back to the original document.",
-        "- Use pandas for csv/tsv/xlsx/xls/ods when useful. Use ElementTree or lxml for XML.",
-        "- Normalize NaN, Infinity, pandas.NA, timestamps, decimals, and numpy values into valid JSON values.",
-        "- Print with json.dumps(..., ensure_ascii=False, allow_nan=False).",
-        "- Never print Python dict reprs, comments, logs, warnings, or NaN tokens.",
-        "- If the first row appears to be headers, use it as columns. Otherwise create column_1, column_2, etc.",
-        `Filename: ${filename}`,
-        "Inspection profile:",
-        JSON.stringify(profile, null, 2),
-      ].join("\n\n"),
-      temperature: 0,
-    });
+    const prompt = [
+      "You are in codemode. Generate a complete Python script that reads the uploaded spreadsheet at SPREADSHEET_PATH and prints one JSON object to stdout.",
+      "Do not explain the code. Return only Python code, with no markdown fences.",
+      "The variable SPREADSHEET_PATH is already defined as the absolute sandbox path. You must read from SPREADSHEET_PATH, not from the filename and not from the current working directory.",
+      "Start by assigning path = pathlib.Path(SPREADSHEET_PATH) or Path(SPREADSHEET_PATH), and use that path variable for every file read.",
+      "The script must dynamically extract the spreadsheet into this exact JSON shape:",
+      '{"description": string, "filename": string, "format": string, "tables": [{"name": string, "columns": string[], "rows": [{"source_row": number, "source_ref": string, "cells": object}]}]}',
+      "Rules:",
+      "- Preserve all meaningful spreadsheet/XML/CSV data.",
+      "- Include source_row and source_ref for every extracted row so answers can point back to the original document.",
+      "- Use pandas for csv/tsv/xlsx/xls/ods when useful. Use ElementTree or lxml for XML.",
+      "- Normalize NaN, Infinity, pandas.NA, timestamps, decimals, and numpy values into valid JSON values.",
+      "- Print with json.dumps(..., ensure_ascii=False, allow_nan=False).",
+      "- Never print Python dict reprs, comments, logs, warnings, or NaN tokens.",
+      "- If the first row appears to be headers, use it as columns. Otherwise create column_1, column_2, etc.",
+      `Filename: ${filename}`,
+      "Inspection profile:",
+      JSON.stringify(profile, null, 2),
+    ].join("\n\n");
 
-    return stripCodeFence(result.text);
+    const entries = configuredModelEntries(this.env);
+    let lastError: unknown;
+
+    for (const entry of entries) {
+      const label = `${entry.provider}:${entry.model}`;
+      const startedAt = Date.now();
+      try {
+        this.recordTrace({
+          detail: label,
+          spanType: "ingestion",
+          status: "running",
+          title: "Generating extraction code",
+        });
+        const model =
+          entry.provider.toLowerCase() === "workers-ai"
+            ? createWorkersAI({ binding: this.env.AI })(entry.model)
+            : this.getGatewayModel([entry]);
+        const result = await generateText({
+          model,
+          prompt,
+          temperature: 0,
+        });
+        this.recordTrace({
+          detail: label,
+          durationMs: Date.now() - startedAt,
+          spanType: "ingestion",
+          status: "done",
+          title: "Extraction code generated",
+        });
+        return stripCodeFence(result.text);
+      } catch (error) {
+        lastError = error;
+        this.recordTrace({
+          detail: error instanceof Error ? { message: error.message, model: label } : { error, model: label },
+          durationMs: Date.now() - startedAt,
+          spanType: "ingestion",
+          status: "error",
+          title: "Extraction code generation failed",
+        });
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("Failed to generate extraction code.");
   }
 
   private extractionSummary(extraction: CodemodeExtraction) {
