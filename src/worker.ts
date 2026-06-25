@@ -513,6 +513,7 @@ async function uploadSpreadsheet(request: Request, env: Env) {
     method: "POST",
   });
 
+  let shouldDestroySandbox = false;
   try {
     await env.SPREADSHEETS.put(r2Key, fileBuffer, {
       httpMetadata: {
@@ -539,6 +540,7 @@ async function uploadSpreadsheet(request: Request, env: Env) {
     await sandbox.writeFile(sandboxPath, arrayBufferToBase64(fileBuffer), {
       encoding: "base64",
     });
+    shouldDestroySandbox = true;
 
     await stub.fetch("https://agent.local/upload-trace", {
       body: JSON.stringify({
@@ -621,6 +623,10 @@ async function uploadSpreadsheet(request: Request, env: Env) {
       method: "POST",
     });
     throw error;
+  } finally {
+    if (shouldDestroySandbox) {
+      await destroyUploadSandbox(sandbox, stub);
+    }
   }
 
   return json(
@@ -682,6 +688,46 @@ async function sendAgentMessage(env: Env, agentName: string, message: string) {
     .json()
     .catch(async () => ({ error: await response.text() }));
   return json(data, { status: response.status });
+}
+
+async function destroyUploadSandbox(sandbox: ReturnType<typeof getSandbox>, stub: DurableObjectStub) {
+  const startedAt = Date.now();
+  await stub.fetch("https://agent.local/upload-trace", {
+    body: JSON.stringify({
+      detail: "Releasing upload sandbox container; the spreadsheet is durable in R2 and can be restored later.",
+      spanType: "upload",
+      status: "running",
+      title: "Releasing sandbox",
+    }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
+
+  try {
+    await sandbox.destroy();
+    await stub.fetch("https://agent.local/upload-trace", {
+      body: JSON.stringify({
+        durationMs: Date.now() - startedAt,
+        spanType: "upload",
+        status: "done",
+        title: "Sandbox released",
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+  } catch (error) {
+    await stub.fetch("https://agent.local/upload-trace", {
+      body: JSON.stringify({
+        detail: error instanceof Error ? error.message : String(error),
+        durationMs: Date.now() - startedAt,
+        spanType: "upload",
+        status: "error",
+        title: "Sandbox release failed",
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+  }
 }
 
 export class HackathonAgent extends Think<Env> {
@@ -839,6 +885,7 @@ export class HackathonAgent extends Think<Env> {
     if (url.pathname.endsWith("/upload-trace") && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as {
         detail?: unknown;
+        durationMs?: unknown;
         spanType?: unknown;
         status?: unknown;
         title?: unknown;
@@ -854,6 +901,7 @@ export class HackathonAgent extends Think<Env> {
 
       this.recordTrace({
         detail: body.detail,
+        durationMs: typeof body.durationMs === "number" ? body.durationMs : undefined,
         spanType: body.spanType,
         status: body.status,
         title: body.title,
