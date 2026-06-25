@@ -255,6 +255,7 @@ async function uploadSpreadsheet(request: Request, env: Env) {
 export class HackathonAgent extends Think<Env> {
   private fileSchemaReady = false;
   private traceSchemaReady = false;
+  private turnStartTimes = new Map<string, number>();
 
   getModel() {
     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.7-code");
@@ -349,6 +350,8 @@ export class HackathonAgent extends Think<Env> {
   }
 
   beforeTurn(ctx: { body?: unknown; messages?: unknown[]; requestId?: string }) {
+    const turnKey = this.turnKey(ctx.requestId);
+    this.turnStartTimes.set(turnKey, Date.now());
     this.recordTrace({
       detail: { messageCount: ctx.messages?.length ?? 0 },
       requestId: ctx.requestId,
@@ -420,8 +423,10 @@ export class HackathonAgent extends Think<Env> {
   }
 
   onChatResponse(result: { requestId?: string; status?: string }) {
+    const durationMs = this.finishTurn(result.requestId);
     this.recordTrace({
       detail: result.status,
+      durationMs,
       requestId: result.requestId,
       spanType: "turn",
       status: "done",
@@ -430,8 +435,10 @@ export class HackathonAgent extends Think<Env> {
   }
 
   onChatError(error: unknown, ctx?: { requestId?: string; stage?: string }) {
+    const durationMs = this.finishTurn(ctx?.requestId);
     this.recordTrace({
       detail: error instanceof Error ? { message: error.message, stage: ctx?.stage } : { error, stage: ctx?.stage },
+      durationMs,
       requestId: ctx?.requestId,
       spanType: "turn",
       status: "error",
@@ -439,6 +446,20 @@ export class HackathonAgent extends Think<Env> {
     });
 
     return error;
+  }
+
+  private turnKey(requestId?: string) {
+    return requestId ?? "__active_turn__";
+  }
+
+  private finishTurn(requestId?: string) {
+    const turnKey = this.turnKey(requestId);
+    const startedAt = this.turnStartTimes.get(turnKey) ?? this.turnStartTimes.get("__active_turn__");
+    if (!startedAt) return;
+
+    this.turnStartTimes.delete(turnKey);
+    if (turnKey !== "__active_turn__") this.turnStartTimes.delete("__active_turn__");
+    return Date.now() - startedAt;
   }
 
   private ensureTraceSchema() {
