@@ -141,6 +141,7 @@ type AnalysisTablesResponse = {
     extraction_score: number;
     updated_at: string;
   } | null;
+  metadata: Record<string, unknown> | null;
   tables: AnalysisTableSummary[];
 };
 
@@ -1480,6 +1481,8 @@ function SQLiteViewer({
         />
       ) : null}
 
+      {analysisTables?.metadata ? <MetadataPanel metadata={analysisTables.metadata} /> : null}
+
       {analysisTables && analysisTables.tables.length > 0 ? (
         <div className="viewer-grid">
           <aside className="table-picker">
@@ -1504,6 +1507,68 @@ function SQLiteViewer({
       ) : null}
     </section>
   );
+}
+
+function MetadataPanel({ metadata }: { metadata: Record<string, unknown> }) {
+  const entries = ([
+    ["Title", metadata.title],
+    ["Description", metadata.description],
+    ["Category", metadata.category],
+    ["Domain", metadata.domain],
+    ["Geography", metadata.geography],
+    ["Time period", metadata.time_period],
+    ["Units", metadata.units],
+    ["Source summary", metadata.source_summary],
+    ["Caveats", metadata.caveats],
+    ["Extraction notes", metadata.extraction_notes],
+    ["Measures", parseMaybeJson(metadata.measures_json)],
+    ["Dimensions", parseMaybeJson(metadata.dimensions_json)],
+    ["Updated", metadata.updated_at],
+  ] satisfies Array<[string, unknown]>).filter(([, value]) => hasMetadataValue(value));
+
+  if (entries.length === 0) return null;
+
+  return (
+    <section className="metadata-panel">
+      <header>
+        <div>
+          <p className="eyebrow">Metadata</p>
+          <h2>{String(metadata.description || metadata.title || "Document metadata")}</h2>
+        </div>
+        {hasMetadataValue(metadata.confidence_score) ? <span className="score-pill">{String(metadata.confidence_score)}/100</span> : null}
+      </header>
+      <dl>
+        {entries.map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{metadataText(value)}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
+function parseMaybeJson(value: unknown) {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+function hasMetadataValue(value: unknown) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") return value.trim().length > 0 && value !== "{}" && value !== "[]";
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value).length > 0;
+  return true;
+}
+
+function metadataText(value: unknown) {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value, null, 2);
 }
 
 function RawDocumentViewer({
