@@ -64,7 +64,34 @@ function arrayBufferToBase64(buffer: ArrayBuffer) {
   return btoa(binary);
 }
 
+async function ensureSpreadsheetInSandbox(env: Env, spreadsheet: SpreadsheetRow | null | undefined) {
+  if (!spreadsheet?.sandbox_path) return;
+
+  const sandbox = getSandbox(env.Sandbox, `sandbox-${spreadsheet.id}`);
+  const check = await sandbox.exec(
+    `python3 - <<'PY'\nimport os\nprint('1' if os.path.exists(${JSON.stringify(spreadsheet.sandbox_path)}) else '0')\nPY`,
+    { timeout: 10_000 },
+  );
+
+  if (check.stdout.trim() === "1") return;
+
+  const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(spreadsheet.agent_name));
+  const response = await stub.fetch("https://agent.local/restore-spreadsheet-file", {
+    body: JSON.stringify({
+      filename: spreadsheet.filename,
+      sandboxPath: spreadsheet.sandbox_path,
+      spreadsheetId: spreadsheet.id,
+    }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
+
+  if (!response.ok) throw new Error((await response.text()) || "Failed to restore spreadsheet file to sandbox.");
+}
+
 async function runPython(env: Env, code = DEFAULT_SCRIPT, spreadsheet?: SpreadsheetRow | null) {
+  await ensureSpreadsheetInSandbox(env, spreadsheet);
+
   const sandboxId = spreadsheet ? `sandbox-${spreadsheet.id}` : "hackathon-python";
   const sandbox = getSandbox(env.Sandbox, sandboxId);
   const prelude = spreadsheet?.sandbox_path
@@ -178,11 +205,27 @@ async function uploadSpreadsheet(request: Request, env: Env) {
   const agentName = agentNameForSpreadsheet(id);
   const sandboxPath = `/workspace/spreadsheets/${id}/${safeFilename(file.name)}`;
   const sandbox = getSandbox(env.Sandbox, `sandbox-${id}`);
+  const fileBase64 = arrayBufferToBase64(await file.arrayBuffer());
 
   await sandbox.mkdir(`/workspace/spreadsheets/${id}`, { recursive: true });
-  await sandbox.writeFile(sandboxPath, arrayBufferToBase64(await file.arrayBuffer()), {
+  await sandbox.writeFile(sandboxPath, fileBase64, {
     encoding: "base64",
   });
+
+  const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(agentName));
+  const fileResponse = await stub.fetch("https://agent.local/spreadsheet-file", {
+    body: JSON.stringify({
+      contentType: file.type || "application/octet-stream",
+      fileBase64,
+      filename: file.name,
+      sandboxPath,
+      sizeBytes: file.size,
+      spreadsheetId: id,
+    }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
+  if (!fileResponse.ok) throw new Error((await fileResponse.text()) || "Failed to persist spreadsheet file.");
 
   await env.DB.prepare(
     [
@@ -210,6 +253,7 @@ async function uploadSpreadsheet(request: Request, env: Env) {
 }
 
 export class HackathonAgent extends Think<Env> {
+  private fileSchemaReady = false;
   private traceSchemaReady = false;
 
   getModel() {
@@ -248,6 +292,57 @@ export class HackathonAgent extends Think<Env> {
     const url = new URL(request.url);
     if (url.pathname.endsWith("/traces")) {
       return json({ traces: this.listTraces(url.searchParams.get("since")) });
+    }
+
+    if (url.pathname.endsWith("/spreadsheet-file") && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as {
+        contentType?: unknown;
+        fileBase64?: unknown;
+        filename?: unknown;
+        sandboxPath?: unknown;
+        sizeBytes?: unknown;
+        spreadsheetId?: unknown;
+      };
+
+      if (
+        typeof body.spreadsheetId !== "string" ||
+        typeof body.filename !== "string" ||
+        typeof body.sandboxPath !== "string" ||
+        typeof body.fileBase64 !== "string" ||
+        typeof body.contentType !== "string" ||
+        typeof body.sizeBytes !== "number"
+      ) {
+        return new Response("Invalid spreadsheet file payload.", { status: 400 });
+      }
+
+      this.storeSpreadsheetFile({
+        contentType: body.contentType,
+        fileBase64: body.fileBase64,
+        filename: body.filename,
+        sandboxPath: body.sandboxPath,
+        sizeBytes: body.sizeBytes,
+        spreadsheetId: body.spreadsheetId,
+      });
+      return json({ ok: true });
+    }
+
+    if (url.pathname.endsWith("/restore-spreadsheet-file") && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as {
+        filename?: unknown;
+        sandboxPath?: unknown;
+        spreadsheetId?: unknown;
+      };
+
+      if (
+        typeof body.spreadsheetId !== "string" ||
+        typeof body.filename !== "string" ||
+        typeof body.sandboxPath !== "string"
+      ) {
+        return new Response("Invalid spreadsheet restore payload.", { status: 400 });
+      }
+
+      await this.restoreSpreadsheetFile(body.spreadsheetId, body.filename, body.sandboxPath);
+      return json({ ok: true });
     }
 
     return super.onRequest(request);
@@ -367,6 +462,89 @@ export class HackathonAgent extends Think<Env> {
       ON agent_traces (created_at DESC)
     `;
     this.traceSchemaReady = true;
+  }
+
+  private ensureFileSchema() {
+    if (this.fileSchemaReady) return;
+
+    this.sql`
+      CREATE TABLE IF NOT EXISTS agent_spreadsheet_files (
+        spreadsheet_id TEXT PRIMARY KEY,
+        filename TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        sandbox_path TEXT NOT NULL,
+        file_base64 TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `;
+    this.fileSchemaReady = true;
+  }
+
+  private storeSpreadsheetFile(input: {
+    contentType: string;
+    fileBase64: string;
+    filename: string;
+    sandboxPath: string;
+    sizeBytes: number;
+    spreadsheetId: string;
+  }) {
+    this.ensureFileSchema();
+    this.sql`
+      INSERT INTO agent_spreadsheet_files (
+        spreadsheet_id,
+        filename,
+        content_type,
+        size_bytes,
+        sandbox_path,
+        file_base64,
+        updated_at
+      )
+      VALUES (
+        ${input.spreadsheetId},
+        ${input.filename},
+        ${input.contentType},
+        ${input.sizeBytes},
+        ${input.sandboxPath},
+        ${input.fileBase64},
+        ${new Date().toISOString()}
+      )
+      ON CONFLICT(spreadsheet_id) DO UPDATE SET
+        filename = excluded.filename,
+        content_type = excluded.content_type,
+        size_bytes = excluded.size_bytes,
+        sandbox_path = excluded.sandbox_path,
+        file_base64 = excluded.file_base64,
+        updated_at = excluded.updated_at
+    `;
+  }
+
+  private async restoreSpreadsheetFile(spreadsheetId: string, filename: string, sandboxPath: string) {
+    this.ensureFileSchema();
+    const rows = this.sql<{
+      file_base64: string;
+    }>`
+      SELECT file_base64
+      FROM agent_spreadsheet_files
+      WHERE spreadsheet_id = ${spreadsheetId}
+      LIMIT 1
+    `;
+
+    if (!rows.length) {
+      throw new Error(
+        [
+          `The sandbox file for ${filename} is missing and this older upload has no durable agent copy to restore from.`,
+          "Re-upload the spreadsheet to seed this agent's durable file store.",
+        ].join(" "),
+      );
+    }
+
+    const sandbox = getSandbox(this.env.Sandbox, `sandbox-${spreadsheetId}`);
+    const directory = sandboxPath.slice(0, sandboxPath.lastIndexOf("/"));
+    await sandbox.mkdir(directory, { recursive: true });
+    await sandbox.writeFile(sandboxPath, rows[0].file_base64, {
+      encoding: "base64",
+    });
   }
 
   private listTraces(since?: string | null) {
