@@ -1040,7 +1040,7 @@ function ChatSurface({
       }
     },
   });
-  const { messages, sendMessage, status } = useAgentChat({ agent });
+  const { clearHistory, messages, sendMessage, status } = useAgentChat({ agent });
   const isBusy = status === "submitted" || status === "streaming";
   const [isTraceCollapsed, setIsTraceCollapsed] = useState(false);
   const [activeView, setActiveView] = useState<AgentView>("chat");
@@ -1196,6 +1196,13 @@ function ChatSurface({
     setInput("");
   }
 
+  function clearChat() {
+    if (isBusy) return;
+    clearHistory();
+    setRenderedMessages([]);
+    setInput("");
+  }
+
   async function retryExtraction() {
     if (isRetryingExtraction) return;
     setIsRetryingExtraction(true);
@@ -1288,19 +1295,33 @@ function ChatSurface({
             <span>{isRetryingExtraction ? "Retrying extraction" : "Retry extraction"}</span>
           </Button>
         ) : null}
-        <Tabs
-          className="view-tabs"
-          size="sm"
-          value={activeView}
-          variant="segmented"
-          tabs={[
-            { label: <span className="tab-label"><FileSpreadsheet size={16} /> Chat</span>, value: "chat" },
-            { label: <span className="tab-label"><Database size={16} /> SQLite</span>, value: "sqlite" },
-            { label: <span className="tab-label"><FileText size={16} /> Raw</span>, value: "raw" },
-            { label: <span className="tab-label"><History size={16} /> Revisions</span>, value: "revisions" },
-          ]}
-          onValueChange={(value) => setActiveView(value as AgentView)}
-        />
+        <div className="chat-toolbar">
+          <Tabs
+            className="view-tabs"
+            size="sm"
+            value={activeView}
+            variant="segmented"
+            tabs={[
+              { label: <span className="tab-label"><FileSpreadsheet size={16} /> Chat</span>, value: "chat" },
+              { label: <span className="tab-label"><Database size={16} /> SQLite</span>, value: "sqlite" },
+              { label: <span className="tab-label"><FileText size={16} /> Raw</span>, value: "raw" },
+              { label: <span className="tab-label"><History size={16} /> Revisions</span>, value: "revisions" },
+            ]}
+            onValueChange={(value) => setActiveView(value as AgentView)}
+          />
+          {activeView === "chat" ? (
+            <Button
+              disabled={isBusy || renderedMessages.length === 0}
+              icon={<Trash2 size={16} />}
+              size="sm"
+              type="button"
+              variant="secondary-destructive"
+              onClick={clearChat}
+            >
+              Clear chat
+            </Button>
+          ) : null}
+        </div>
       </header>
 
       <div className={`chat-main ${isTraceCollapsed ? "trace-collapsed" : ""}`}>

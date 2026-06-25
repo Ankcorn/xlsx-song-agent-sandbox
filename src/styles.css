@@ -409,7 +409,7 @@
   }
 
   .chat-header .back-link,
-  .chat-header .view-tabs {
+  .chat-toolbar {
     @apply col-span-full;
   }
 
@@ -419,6 +419,10 @@
 
   .view-tabs {
     @apply justify-self-start;
+  }
+
+  .chat-toolbar {
+    @apply flex flex-wrap items-center justify-between gap-3;
   }
 
   .tab-label {
