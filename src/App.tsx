@@ -184,6 +184,7 @@ function SpreadsheetListPage() {
   const [spreadsheets, setSpreadsheets] = useState<Spreadsheet[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchJson<SpreadsheetListResponse>("/api/spreadsheets")
@@ -191,6 +192,36 @@ function SpreadsheetListPage() {
       .catch((caught: Error) => setError(caught.message))
       .finally(() => setIsLoading(false));
   }, []);
+
+  async function retryExtraction(spreadsheetId: string) {
+    if (retryingId) return;
+    setRetryingId(spreadsheetId);
+    setError(null);
+    setSpreadsheets((current) =>
+      current.map((spreadsheet) =>
+        spreadsheet.id === spreadsheetId ? { ...spreadsheet, error_message: null, pre_extract: 1, status: "processing" } : spreadsheet,
+      ),
+    );
+
+    try {
+      const data = await fetchJson<SpreadsheetResponse>(`/api/spreadsheets/${spreadsheetId}/retry-extraction`, {
+        method: "POST",
+      });
+      setSpreadsheets((current) =>
+        current.map((spreadsheet) => (spreadsheet.id === spreadsheetId ? data.spreadsheet : spreadsheet)),
+      );
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Extraction retry failed";
+      setSpreadsheets((current) =>
+        current.map((spreadsheet) =>
+          spreadsheet.id === spreadsheetId ? { ...spreadsheet, error_message: message, status: "failed" } : spreadsheet,
+        ),
+      );
+      setError(message);
+    } finally {
+      setRetryingId(null);
+    }
+  }
 
   return (
     <section className="content-band">
@@ -239,6 +270,21 @@ function SpreadsheetListPage() {
                 </p>
                 {spreadsheet.error_message ? <p className="row-error">{spreadsheet.error_message}</p> : null}
               </div>
+              {spreadsheet.status === "failed" ? (
+                <button
+                  className="retry-button"
+                  disabled={retryingId === spreadsheet.id}
+                  type="button"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    void retryExtraction(spreadsheet.id);
+                  }}
+                >
+                  {retryingId === spreadsheet.id ? <Loader2 className="spin" size={16} /> : null}
+                  <span>{retryingId === spreadsheet.id ? "Retrying" : "Retry extraction"}</span>
+                </button>
+              ) : null}
             </Link>
           ))}
         </div>
@@ -459,16 +505,18 @@ function SpreadsheetChatPage() {
     );
   }
 
-  return <ChatSurface input={input} setInput={setInput} spreadsheet={spreadsheet} />;
+  return <ChatSurface input={input} setInput={setInput} setSpreadsheet={setSpreadsheet} spreadsheet={spreadsheet} />;
 }
 
 function ChatSurface({
   input,
   setInput,
+  setSpreadsheet,
   spreadsheet,
 }: {
   input: string;
   setInput: (value: string) => void;
+  setSpreadsheet: (spreadsheet: Spreadsheet) => void;
   spreadsheet: Spreadsheet;
 }) {
   const [traces, setTraces] = useState<AgentTrace[]>([]);
@@ -497,6 +545,7 @@ function ChatSurface({
   const [rawPreview, setRawPreview] = useState<RawPreviewResponse | null>(null);
   const [viewerError, setViewerError] = useState<string | null>(null);
   const [isViewerLoading, setIsViewerLoading] = useState(false);
+  const [isRetryingExtraction, setIsRetryingExtraction] = useState(false);
 
   const visibleMessages = useMemo(
     () => messages.filter((message) => textFromParts(message.parts).trim().length > 0),
@@ -598,6 +647,30 @@ function ChatSurface({
     setInput("");
   }
 
+  async function retryExtraction() {
+    if (isRetryingExtraction) return;
+    setIsRetryingExtraction(true);
+    setViewerError(null);
+    setSpreadsheet({ ...spreadsheet, error_message: null, pre_extract: 1, status: "processing" });
+
+    try {
+      const data = await fetchJson<SpreadsheetResponse>(`/api/spreadsheets/${spreadsheet.id}/retry-extraction`, {
+        method: "POST",
+      });
+      setAnalysisTables(null);
+      setSelectedTable(null);
+      setTableData(null);
+      setSpreadsheet(data.spreadsheet);
+      setActiveView("sqlite");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Extraction retry failed";
+      setViewerError(message);
+      setSpreadsheet({ ...spreadsheet, error_message: message, status: "failed" });
+    } finally {
+      setIsRetryingExtraction(false);
+    }
+  }
+
   return (
     <section className="chat-page">
       <header className="chat-header">
@@ -612,6 +685,12 @@ function ChatSurface({
             {formatBytes(spreadsheet.size_bytes)} · {spreadsheet.content_type || "spreadsheet"} · {extractionLabel(spreadsheet)}
           </p>
         </div>
+        {spreadsheet.status === "failed" ? (
+          <button className="retry-button header-retry" disabled={isRetryingExtraction} type="button" onClick={() => void retryExtraction()}>
+            {isRetryingExtraction ? <Loader2 className="spin" size={16} /> : null}
+            <span>{isRetryingExtraction ? "Retrying extraction" : "Retry extraction"}</span>
+          </button>
+        ) : null}
         <nav className="view-tabs" aria-label="Spreadsheet agent views">
           <button className={activeView === "chat" ? "active" : ""} type="button" onClick={() => setActiveView("chat")}>
             <FileSpreadsheet size={16} />

@@ -779,6 +779,76 @@ async function sendAgentMessage(env: Env, agentName: string, message: string) {
   return json(data, { status: response.status });
 }
 
+async function retrySpreadsheetExtraction(env: Env, spreadsheetId: string) {
+  const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
+  if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+  if (!spreadsheet.r2_key) return json({ error: "Spreadsheet file is not available in R2." }, { status: 409 });
+
+  const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(spreadsheet.agent_name));
+  await env.DB.prepare(
+    [
+      "UPDATE spreadsheets",
+      "SET status = 'processing', pre_extract = 1, error_message = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+      "WHERE id = ?",
+    ].join(" "),
+  )
+    .bind(spreadsheet.id)
+    .run();
+
+  try {
+    const fileResponse = await stub.fetch("https://agent.local/spreadsheet-file", {
+      body: JSON.stringify({
+        contentType: spreadsheet.content_type || "application/octet-stream",
+        filename: spreadsheet.filename,
+        preExtract: true,
+        r2Key: spreadsheet.r2_key,
+        sandboxPath: spreadsheet.sandbox_path,
+        sizeBytes: spreadsheet.size_bytes,
+        spreadsheetId: spreadsheet.id,
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    if (!fileResponse.ok) throw new Error((await fileResponse.text()) || "Failed to persist spreadsheet file metadata.");
+
+    const analysisResponse = await stub.fetch("https://agent.local/retry-extraction", {
+      body: JSON.stringify({
+        filename: spreadsheet.filename,
+        sandboxPath: spreadsheet.sandbox_path,
+        spreadsheetId: spreadsheet.id,
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    if (!analysisResponse.ok) throw new Error((await analysisResponse.text()) || "Failed to retry extraction.");
+
+    await env.DB.prepare(
+      [
+        "UPDATE spreadsheets",
+        "SET status = 'ready', pre_extract = 1, error_message = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        "WHERE id = ?",
+      ].join(" "),
+    )
+      .bind(spreadsheet.id)
+      .run();
+
+    const updated = await getSpreadsheetRow(env, spreadsheet.id);
+    return json({ spreadsheet: updated });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Extraction retry failed";
+    await env.DB.prepare(
+      [
+        "UPDATE spreadsheets",
+        "SET status = 'failed', error_message = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        "WHERE id = ?",
+      ].join(" "),
+    )
+      .bind(message, spreadsheet.id)
+      .run();
+    throw error;
+  }
+}
+
 async function destroyUploadSandbox(sandbox: ReturnType<typeof getSandbox>, stub: DurableObjectStub) {
   const startedAt = Date.now();
   await stub.fetch("https://agent.local/upload-trace", {
@@ -1102,6 +1172,53 @@ export class HackathonAgent extends Think<Env> {
         title: "Pre-analysis complete",
       });
       return json(analysis);
+    }
+
+    if (url.pathname.endsWith("/retry-extraction") && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as {
+        filename?: unknown;
+        sandboxPath?: unknown;
+        spreadsheetId?: unknown;
+      };
+
+      if (
+        typeof body.spreadsheetId !== "string" ||
+        typeof body.filename !== "string" ||
+        typeof body.sandboxPath !== "string"
+      ) {
+        return new Response("Invalid extraction retry payload.", { status: 400 });
+      }
+
+      const startedAt = Date.now();
+      this.recordTrace({
+        detail: { filename: body.filename },
+        spanType: "ingestion",
+        status: "running",
+        title: "Extraction retry started",
+      });
+
+      try {
+        const analysis = await this.analyzeSpreadsheetFile(body.spreadsheetId, body.filename, body.sandboxPath);
+        this.recordTrace({
+          detail: { score: analysis.score, tables: analysis.tables },
+          durationMs: Date.now() - startedAt,
+          spanType: "ingestion",
+          status: "done",
+          title: "Extraction retry complete",
+        });
+        return json(analysis);
+      } catch (error) {
+        this.recordTrace({
+          detail: error instanceof Error ? error.message : String(error),
+          durationMs: Date.now() - startedAt,
+          spanType: "ingestion",
+          status: "error",
+          title: "Extraction retry failed",
+        });
+        throw error;
+      } finally {
+        await getSandbox(this.env.Sandbox, `sandbox-${body.spreadsheetId}`).destroy().catch(() => undefined);
+      }
     }
 
     return super.onRequest(request);
@@ -1810,6 +1927,11 @@ export default {
     const spreadsheetAgentRequestMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/agent-request$/);
     if (spreadsheetAgentRequestMatch && request.method === "POST") {
       return sendSpreadsheetAgentRequest(request, env, spreadsheetAgentRequestMatch[1]);
+    }
+
+    const spreadsheetRetryExtractionMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/retry-extraction$/);
+    if (spreadsheetRetryExtractionMatch && request.method === "POST") {
+      return retrySpreadsheetExtraction(env, spreadsheetRetryExtractionMatch[1]);
     }
 
     const spreadsheetTablesMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/tables$/);

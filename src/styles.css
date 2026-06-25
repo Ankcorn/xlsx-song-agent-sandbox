@@ -141,7 +141,7 @@ h2 {
   align-items: center;
   display: grid;
   gap: 14px;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   padding: 18px;
 }
 
@@ -165,6 +165,31 @@ h2 {
 .spreadsheet-row .row-error {
   color: #b42318;
   font-weight: 800;
+}
+
+.retry-button {
+  align-items: center;
+  background: white;
+  border: 1px solid #cbd4df;
+  border-radius: 8px;
+  color: #12343b;
+  cursor: pointer;
+  display: inline-flex;
+  font-weight: 900;
+  gap: 8px;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.retry-button:hover {
+  border-color: #2f6f73;
+}
+
+.retry-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
 }
 
 .empty-list,
@@ -296,7 +321,17 @@ h2 {
   border-bottom: 1px solid #d9dee5;
   display: grid;
   gap: 16px;
+  grid-template-columns: minmax(0, 1fr) auto;
   padding: 22px 28px;
+}
+
+.chat-header .back-link,
+.chat-header .view-tabs {
+  grid-column: 1 / -1;
+}
+
+.header-retry {
+  align-self: end;
 }
 
 .view-tabs {
@@ -711,6 +746,10 @@ h2 {
     flex-direction: column;
   }
 
+  .chat-header {
+    align-items: flex-start;
+  }
+
   .content-band,
   .chat-header,
   .messages,
@@ -727,6 +766,23 @@ h2 {
 
   .chat-main.trace-collapsed {
     grid-template-columns: 1fr;
+  }
+
+  .spreadsheet-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .spreadsheet-row .retry-button {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .chat-header {
+    grid-template-columns: 1fr;
+  }
+
+  .header-retry {
+    align-self: start;
   }
 
   .trace-panel {
