@@ -545,7 +545,63 @@ function safeTraceDetail(detail: unknown) {
   if (detail === undefined) return null;
 
   const text = typeof detail === "string" ? detail : JSON.stringify(detail);
-  return text.length > 1800 ? `${text.slice(0, 1800)}...` : text;
+  return text.length > 2400 ? `${text.slice(0, 2400)}...` : text;
+}
+
+function traceSnippet(value: unknown, limit = 900) {
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  if (!text) return "";
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function traceDetail(summary: string, snippet?: unknown) {
+  return {
+    snippet: snippet === undefined ? undefined : traceSnippet(snippet),
+    summary,
+  };
+}
+
+function profileSummary(profile: unknown) {
+  if (typeof profile !== "object" || profile === null) return profile;
+  const record = profile as {
+    extension?: unknown;
+    filename?: unknown;
+    sheets?: unknown;
+    size_bytes?: unknown;
+  };
+  const sheets = Array.isArray(record.sheets)
+    ? record.sheets.map((sheet) => {
+        if (typeof sheet !== "object" || sheet === null) return sheet;
+        const typedSheet = sheet as {
+          columns_seen?: unknown;
+          delimiter?: unknown;
+          name?: unknown;
+          parser?: unknown;
+          rows_seen?: unknown;
+        };
+        return {
+          columns_seen: typedSheet.columns_seen,
+          delimiter: typedSheet.delimiter,
+          name: typedSheet.name,
+          parser: typedSheet.parser,
+          rows_seen: typedSheet.rows_seen,
+        };
+      })
+    : [];
+  return {
+    extension: record.extension,
+    filename: record.filename,
+    sheets,
+    size_bytes: record.size_bytes,
+  };
+}
+
+function extractionTableSummary(extraction: CodemodeExtraction) {
+  return extraction.tables.map((table) => ({
+    columns: table.columns.slice(0, 12),
+    name: table.name,
+    row_count: table.rows.length,
+  }));
 }
 
 function safeFilename(filename: string) {
@@ -1610,30 +1666,113 @@ export class HackathonAgent extends Think<Env> {
 
   private async analyzeSpreadsheetFile(spreadsheetId: string, filename: string, sandboxPath: string) {
     this.ensureFileSchema();
+    const restoreStartedAt = Date.now();
+    this.recordTrace({
+      detail: traceDetail("Restoring the uploaded file from R2 into the sandbox workspace.", sandboxPath),
+      spanType: "ingestion",
+      status: "running",
+      title: "Preparing sandbox file",
+    });
     await this.restoreSpreadsheetFile(spreadsheetId, filename, sandboxPath);
+    this.recordTrace({
+      detail: traceDetail("The spreadsheet is available on disk for Python code to inspect.", sandboxPath),
+      durationMs: Date.now() - restoreStartedAt,
+      spanType: "ingestion",
+      status: "done",
+      title: "Sandbox file ready",
+    });
 
     const sandbox = getSandbox(this.env.Sandbox, `sandbox-${spreadsheetId}`);
+    const inspectionStartedAt = Date.now();
+    this.recordTrace({
+      detail: traceDetail("Running a small Python profiler to identify format, sheets, dimensions, delimiter, and sample rows."),
+      spanType: "ingestion",
+      status: "running",
+      title: "Inspecting document shape",
+    });
     const profileResult = await sandbox.exec(
       `python3 - <<'PY'\nSPREADSHEET_PATH = ${JSON.stringify(sandboxPath)}\n${CODEMODE_INSPECTION_SCRIPT}\nPY`,
       { timeout: 60_000 },
     );
 
     if (!profileResult.success) {
+      this.recordTrace({
+        detail: traceDetail("The document shape inspection failed before extraction code could be generated.", profileResult.stderr),
+        durationMs: Date.now() - inspectionStartedAt,
+        spanType: "ingestion",
+        status: "error",
+        title: "Document inspection failed",
+      });
       throw new Error(profileResult.stderr || "Codemode spreadsheet inspection failed.");
     }
 
     const profile = parseJsonText(profileResult.stdout);
+    this.recordTrace({
+      detail: traceDetail(
+        "The document shape was profiled and will guide the generated extraction code.",
+        profileSummary(profile),
+      ),
+      durationMs: Date.now() - inspectionStartedAt,
+      spanType: "ingestion",
+      status: "done",
+      title: "Document shape inspected",
+    });
     const code = await this.generateCodemodeExtractionCode(filename, profile);
+    const extractionStartedAt = Date.now();
+    this.recordTrace({
+      detail: traceDetail("Running the generated Python extraction script in the sandbox.", code),
+      spanType: "ingestion",
+      status: "running",
+      title: "Running extraction code",
+    });
     const extractionResult = await sandbox.exec(
       `python3 - <<'PY'\nSPREADSHEET_PATH = ${JSON.stringify(sandboxPath)}\n${code}\nPY`,
       { timeout: 120_000 },
     );
 
     if (!extractionResult.success) {
+      this.recordTrace({
+        detail: traceDetail("The generated extraction code failed while reading the spreadsheet.", extractionResult.stderr),
+        durationMs: Date.now() - extractionStartedAt,
+        spanType: "ingestion",
+        status: "error",
+        title: "Extraction code failed",
+      });
       throw new Error(extractionResult.stderr || "Codemode spreadsheet extraction failed.");
     }
 
+    this.recordTrace({
+      detail: traceDetail("The generated extraction code produced JSON for the document database.", extractionResult.stdout),
+      durationMs: Date.now() - extractionStartedAt,
+      spanType: "ingestion",
+      status: "done",
+      title: "Extraction code complete",
+    });
+    const parseStartedAt = Date.now();
+    this.recordTrace({
+      detail: traceDetail("Validating and normalizing the generated JSON before writing SQLite tables."),
+      spanType: "ingestion",
+      status: "running",
+      title: "Normalizing extraction output",
+    });
     const extraction = normalizeCodemodeExtraction(parseJsonText(extractionResult.stdout), filename);
+    this.recordTrace({
+      detail: traceDetail("The extraction JSON is valid and has been normalized into table definitions.", {
+        description: extraction.description,
+        tables: extractionTableSummary(extraction),
+      }),
+      durationMs: Date.now() - parseStartedAt,
+      spanType: "ingestion",
+      status: "done",
+      title: "Extraction output normalized",
+    });
+    const storeStartedAt = Date.now();
+    this.recordTrace({
+      detail: traceDetail("Creating dynamic SQLite tables inside this agent durable object.", extractionTableSummary(extraction)),
+      spanType: "ingestion",
+      status: "running",
+      title: "Writing SQLite tables",
+    });
     this.storeCodemodeExtraction(spreadsheetId, extraction);
 
     this.sql`
@@ -1660,6 +1799,16 @@ export class HackathonAgent extends Think<Env> {
         extraction_score = excluded.extraction_score,
         updated_at = excluded.updated_at
     `;
+    this.recordTrace({
+      detail: traceDetail("The agent SQLite database now contains the extracted document data.", {
+        description: extraction.description,
+        tables: extractionTableSummary(extraction),
+      }),
+      durationMs: Date.now() - storeStartedAt,
+      spanType: "ingestion",
+      status: "done",
+      title: "SQLite tables ready",
+    });
 
     return { description: extraction.description, mode: "codemode", score: 100, tables: extraction.tables.length };
   }
@@ -1738,7 +1887,10 @@ export class HackathonAgent extends Think<Env> {
       const startedAt = Date.now();
       try {
         this.recordTrace({
-          detail: label,
+          detail: traceDetail("Asking the configured model to write a robust Python extractor for this document shape.", {
+            model: label,
+            profile: profileSummary(profile),
+          }),
           spanType: "ingestion",
           status: "running",
           title: "Generating extraction code",
@@ -1752,18 +1904,25 @@ export class HackathonAgent extends Think<Env> {
           prompt,
           temperature: 0,
         });
+        const code = stripCodeFence(result.text);
         this.recordTrace({
-          detail: label,
+          detail: traceDetail("The model returned executable Python code for the sandbox.", {
+            code,
+            model: label,
+          }),
           durationMs: Date.now() - startedAt,
           spanType: "ingestion",
           status: "done",
           title: "Extraction code generated",
         });
-        return stripCodeFence(result.text);
+        return code;
       } catch (error) {
         lastError = error;
         this.recordTrace({
-          detail: error instanceof Error ? { message: error.message, model: label } : { error, model: label },
+          detail: traceDetail(
+            "This model failed to generate extraction code. The fallback chain will continue if another model is configured.",
+            error instanceof Error ? { message: error.message, model: label } : { error, model: label },
+          ),
           durationMs: Date.now() - startedAt,
           spanType: "ingestion",
           status: "error",

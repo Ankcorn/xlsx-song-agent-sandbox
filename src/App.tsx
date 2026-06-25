@@ -1,5 +1,6 @@
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { Badge, Banner, Button, Empty, Input, Loader, Table, Tabs } from "@cloudflare/kumo";
 import {
   Link,
   Outlet,
@@ -15,7 +16,6 @@ import {
   Database,
   FileSpreadsheet,
   FileText,
-  Loader2,
   PanelRightClose,
   PanelRightOpen,
   Plus,
@@ -24,8 +24,9 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import "@cloudflare/kumo/styles/standalone";
 import "./styles.css";
 
 type Spreadsheet = {
@@ -111,10 +112,38 @@ type RawPreviewResponse = {
 
 type AgentView = "chat" | "sqlite" | "raw";
 
-function textFromParts(parts: Array<{ type: string; text?: string }>) {
-  return parts
-    .filter((part) => part.type === "text")
-    .map((part) => part.text ?? "")
+type RenderedMessage = {
+  id: string;
+  role: string;
+  text: string;
+};
+
+function textFromMessage(message: unknown) {
+  if (typeof message !== "object" || message === null) return "";
+  const candidate = message as {
+    content?: unknown;
+    parts?: unknown;
+    text?: unknown;
+  };
+
+  if (typeof candidate.text === "string") return candidate.text;
+  if (typeof candidate.content === "string") return candidate.content;
+
+  if (!Array.isArray(candidate.parts)) return "";
+
+  return candidate.parts
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (typeof part !== "object" || part === null) return "";
+      const typedPart = part as {
+        content?: unknown;
+        text?: unknown;
+        type?: unknown;
+      };
+      if (typeof typedPart.text === "string") return typedPart.text;
+      if (typeof typedPart.content === "string") return typedPart.content;
+      return "";
+    })
     .join("");
 }
 
@@ -136,6 +165,26 @@ function formatTraceDetail(detail: string | null) {
   }
 }
 
+function traceDetailParts(detail: string | null) {
+  if (!detail) return { raw: null, snippet: null, summary: null };
+
+  try {
+    const parsed = JSON.parse(detail) as unknown;
+    if (typeof parsed === "object" && parsed !== null) {
+      const record = parsed as Record<string, unknown>;
+      return {
+        raw: JSON.stringify(parsed, null, 2),
+        snippet: typeof record.snippet === "string" ? record.snippet : null,
+        summary: typeof record.summary === "string" ? record.summary : null,
+      };
+    }
+    if (typeof parsed === "string") return { raw: parsed, snippet: null, summary: parsed };
+    return { raw: String(parsed), snippet: null, summary: null };
+  } catch {
+    return { raw: detail, snippet: null, summary: detail };
+  }
+}
+
 function isAgentTraceMessage(value: unknown): value is AgentTraceMessage {
   return (
     typeof value === "object" &&
@@ -148,6 +197,12 @@ function isAgentTraceMessage(value: unknown): value is AgentTraceMessage {
 
 function extractionLabel(spreadsheet: Spreadsheet) {
   return spreadsheet.pre_extract === 0 ? "Just uploaded" : "Pre-extracted";
+}
+
+function statusVariant(status?: Spreadsheet["status"]) {
+  if (status === "ready") return "success";
+  if (status === "failed") return "error";
+  return "warning";
 }
 
 function cellText(value: unknown) {
@@ -259,20 +314,24 @@ function SpreadsheetListPage() {
 
       {isLoading ? (
         <div className="status-line">
-          <Loader2 className="spin" size={18} />
+          <Loader size="sm" />
           <span>Loading spreadsheets</span>
         </div>
       ) : error ? (
-        <p className="error-text">{error}</p>
+        <Banner variant="error" title="Could not load spreadsheets" description={error} />
       ) : spreadsheets.length === 0 ? (
-        <div className="empty-list">
-          <FileSpreadsheet size={34} />
-          <p>No spreadsheets yet.</p>
-          <Link to="/upload" className="primary-link">
-            <Upload size={18} />
-            <span>Upload first spreadsheet</span>
-          </Link>
-        </div>
+        <Empty
+          className="empty-list"
+          icon={<FileSpreadsheet size={42} />}
+          title="No spreadsheets yet"
+          description="Upload a spreadsheet to create its agent."
+          contents={
+            <Link to="/upload" className="primary-link">
+              <Upload size={18} />
+              <span>Upload first spreadsheet</span>
+            </Link>
+          }
+        />
       ) : (
         <div className="spreadsheet-list">
           {spreadsheets.map((spreadsheet) => (
@@ -286,41 +345,52 @@ function SpreadsheetListPage() {
               <div>
                 <h2>{spreadsheet.filename}</h2>
                 <p>
-                  {formatBytes(spreadsheet.size_bytes)} · {spreadsheet.status ?? "ready"} · {extractionLabel(spreadsheet)} ·{" "}
-                  {spreadsheet.agent_name}
+                  {formatBytes(spreadsheet.size_bytes)} · {spreadsheet.agent_name}
                 </p>
+                <div className="row-badges">
+                  <Badge appearance="dot" variant={statusVariant(spreadsheet.status)}>
+                    {spreadsheet.status ?? "ready"}
+                  </Badge>
+                  <Badge variant={spreadsheet.pre_extract === 0 ? "neutral" : "teal-subtle"}>{extractionLabel(spreadsheet)}</Badge>
+                </div>
                 {spreadsheet.error_message ? <p className="row-error">{spreadsheet.error_message}</p> : null}
               </div>
               <div className="row-actions">
                 {spreadsheet.status === "failed" ? (
-                  <button
+                  <Button
                     className="retry-button"
                     disabled={retryingId === spreadsheet.id || deletingId === spreadsheet.id}
+                    loading={retryingId === spreadsheet.id}
+                    size="sm"
                     type="button"
+                    variant="secondary"
                     onClick={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
                       void retryExtraction(spreadsheet.id);
                     }}
                   >
-                    {retryingId === spreadsheet.id ? <Loader2 className="spin" size={16} /> : null}
                     <span>{retryingId === spreadsheet.id ? "Retrying" : "Retry extraction"}</span>
-                  </button>
+                  </Button>
                 ) : null}
-                <button
+                <Button
                   aria-label={`Delete ${spreadsheet.filename}`}
                   className="delete-button"
                   disabled={deletingId === spreadsheet.id}
+                  loading={deletingId === spreadsheet.id}
+                  shape="square"
+                  size="sm"
                   title="Delete spreadsheet"
                   type="button"
+                  variant="secondary-destructive"
                   onClick={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
                     void deleteSpreadsheet(spreadsheet);
                   }}
                 >
-                  {deletingId === spreadsheet.id ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
-                </button>
+                  <Trash2 size={16} />
+                </Button>
               </div>
             </Link>
           ))}
@@ -465,12 +535,18 @@ function UploadPage() {
           <strong>{preExtract ? "Pre-extract with codemode" : "Just upload"}</strong>
         </label>
 
-        {error ? <p className="error-text">{error}</p> : null}
+        {error ? <Banner variant="error" title="Upload failed" description={error} /> : null}
 
-        <button className="primary-button" type="submit" disabled={!file || isUploading}>
-          {isUploading ? <Loader2 className="spin" size={18} /> : <Upload size={18} />}
+        <Button
+          className="primary-button"
+          icon={<Upload size={18} />}
+          loading={isUploading}
+          type="submit"
+          variant="primary"
+          disabled={!file || isUploading}
+        >
           <span>{isUploading ? "Uploading" : "Create agent"}</span>
-        </button>
+        </Button>
 
         {(isUploading || uploadTraces.length > 0) && (
           <div className="upload-steps">
@@ -478,22 +554,19 @@ function UploadPage() {
               <p className="eyebrow">{preExtract ? "Analysis" : "Upload"}</p>
               <h2>{preExtract ? "Preparing spreadsheet agent" : "Storing spreadsheet file"}</h2>
             </header>
-            <ol className="trace-list">
+            <ol className="upload-step-carousel" aria-label="Upload and analysis steps">
               {uploadTraces.map((trace) => {
-                const detail = formatTraceDetail(trace.detail);
+                const detail = traceDetailParts(trace.detail);
                 return (
-                  <li className={`trace-item ${trace.status}`} key={trace.id}>
-                    <div>
-                      <span className="trace-dot" />
+                  <li className={`upload-step-card ${trace.status}`} key={trace.id}>
+                    <span className="trace-dot" />
+                    <div className="trace-title-row">
+                      <h3>{trace.title}</h3>
+                      {trace.duration_ms ? <span>{trace.duration_ms}ms</span> : null}
                     </div>
-                    <article>
-                      <div className="trace-title-row">
-                        <h3>{trace.title}</h3>
-                        {trace.duration_ms ? <span>{trace.duration_ms}ms</span> : null}
-                      </div>
-                      <p>{trace.span_type}</p>
-                      {detail ? <pre>{detail}</pre> : null}
-                    </article>
+                    <p className="upload-step-type">{trace.span_type}</p>
+                    {detail.summary ? <p className="upload-step-summary">{detail.summary}</p> : null}
+                    {detail.snippet ? <pre>{detail.snippet}</pre> : detail.raw ? <pre>{detail.raw}</pre> : null}
                   </li>
                 );
               })}
@@ -526,7 +599,7 @@ function SpreadsheetChatPage() {
           <ArrowLeft size={18} />
           <span>Spreadsheets</span>
         </Link>
-        <p className="error-text">{error}</p>
+        <Banner variant="error" title="Could not load spreadsheet" description={error} />
       </section>
     );
   }
@@ -535,7 +608,7 @@ function SpreadsheetChatPage() {
     return (
       <section className="content-band">
         <div className="status-line">
-          <Loader2 className="spin" size={18} />
+          <Loader size="sm" />
           <span>Loading spreadsheet agent</span>
         </div>
       </section>
@@ -583,11 +656,27 @@ function ChatSurface({
   const [viewerError, setViewerError] = useState<string | null>(null);
   const [isViewerLoading, setIsViewerLoading] = useState(false);
   const [isRetryingExtraction, setIsRetryingExtraction] = useState(false);
+  const [renderedMessages, setRenderedMessages] = useState<RenderedMessage[]>([]);
 
-  const visibleMessages = useMemo(
-    () => messages.filter((message) => textFromParts(message.parts).trim().length > 0),
-    [messages],
-  );
+  useEffect(() => {
+    setRenderedMessages((current) => {
+      const previousById = new Map(current.map((message) => [message.id, message]));
+      const next = messages
+        .map((message) => {
+          const text = textFromMessage(message).trim();
+          const previous = previousById.get(message.id);
+          return {
+            id: message.id,
+            role: message.role,
+            text: text || previous?.text || "",
+          };
+        })
+        .filter((message) => message.text.length > 0);
+
+      if (next.length === 0 && current.length > 0 && messages.length > 0) return current;
+      return next;
+    });
+  }, [messages]);
 
   useEffect(() => {
     let isMounted = true;
@@ -723,45 +812,53 @@ function ChatSurface({
           </p>
         </div>
         {spreadsheet.status === "failed" ? (
-          <button className="retry-button header-retry" disabled={isRetryingExtraction} type="button" onClick={() => void retryExtraction()}>
-            {isRetryingExtraction ? <Loader2 className="spin" size={16} /> : null}
+          <Button
+            className="retry-button header-retry"
+            disabled={isRetryingExtraction}
+            loading={isRetryingExtraction}
+            size="sm"
+            type="button"
+            variant="secondary"
+            onClick={() => void retryExtraction()}
+          >
             <span>{isRetryingExtraction ? "Retrying extraction" : "Retry extraction"}</span>
-          </button>
+          </Button>
         ) : null}
-        <nav className="view-tabs" aria-label="Spreadsheet agent views">
-          <button className={activeView === "chat" ? "active" : ""} type="button" onClick={() => setActiveView("chat")}>
-            <FileSpreadsheet size={16} />
-            <span>Chat</span>
-          </button>
-          <button className={activeView === "sqlite" ? "active" : ""} type="button" onClick={() => setActiveView("sqlite")}>
-            <Database size={16} />
-            <span>SQLite</span>
-          </button>
-          <button className={activeView === "raw" ? "active" : ""} type="button" onClick={() => setActiveView("raw")}>
-            <FileText size={16} />
-            <span>Raw</span>
-          </button>
-        </nav>
+        <Tabs
+          className="view-tabs"
+          size="sm"
+          value={activeView}
+          variant="segmented"
+          tabs={[
+            { label: <span className="tab-label"><FileSpreadsheet size={16} /> Chat</span>, value: "chat" },
+            { label: <span className="tab-label"><Database size={16} /> SQLite</span>, value: "sqlite" },
+            { label: <span className="tab-label"><FileText size={16} /> Raw</span>, value: "raw" },
+          ]}
+          onValueChange={(value) => setActiveView(value as AgentView)}
+        />
       </header>
 
       <div className={`chat-main ${isTraceCollapsed ? "trace-collapsed" : ""}`}>
         <div className="chat-workspace">
           {activeView === "chat" ? (
             <div className="messages">
-              {visibleMessages.length === 0 ? (
-                <div className="empty-state">
-                  <FileSpreadsheet size={28} />
-                  <p>
-                    {spreadsheet.pre_extract === 0
+              {renderedMessages.length === 0 ? (
+                <Empty
+                  className="empty-state"
+                  icon={<FileSpreadsheet size={38} />}
+                  size="sm"
+                  title="Spreadsheet agent ready"
+                  description={
+                    spreadsheet.pre_extract === 0
                       ? "This spreadsheet is available as a raw file in the sandbox."
-                      : "This spreadsheet has a pre-extracted SQLite database."}
-                  </p>
-                </div>
+                      : "This spreadsheet has a pre-extracted SQLite database."
+                  }
+                />
               ) : (
-                visibleMessages.map((message) => (
+                renderedMessages.map((message) => (
                   <article className={`message ${message.role}`} key={message.id}>
                     <span>{message.role}</span>
-                    <p>{textFromParts(message.parts)}</p>
+                    <p>{message.text}</p>
                   </article>
                 ))
               )}
@@ -780,15 +877,23 @@ function ChatSurface({
           )}
 
           <form className="composer" onSubmit={submitMessage}>
-            <input
+            <Input
               aria-label="Message"
               value={input}
               onChange={(event) => setInput(event.target.value)}
               placeholder="Ask this spreadsheet agent..."
             />
-            <button className="icon-button" type="submit" disabled={isBusy || !input.trim()}>
-              {isBusy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
-            </button>
+            <Button
+              aria-label="Send message"
+              className="icon-button"
+              loading={isBusy}
+              shape="square"
+              type="submit"
+              variant="primary"
+              disabled={isBusy || !input.trim()}
+            >
+              <Send size={18} />
+            </Button>
           </form>
         </div>
 
@@ -798,15 +903,18 @@ function ChatSurface({
               <p className="eyebrow">Trace</p>
               <h2>Agent steps</h2>
             </div>
-            <button
+            <Button
               aria-label={isTraceCollapsed ? "Expand trace panel" : "Collapse trace panel"}
               className="trace-toggle"
+              shape="square"
+              size="sm"
               onClick={() => setIsTraceCollapsed((value) => !value)}
               title={isTraceCollapsed ? "Expand trace panel" : "Collapse trace panel"}
               type="button"
+              variant="secondary"
             >
               {isTraceCollapsed ? <PanelRightOpen size={18} /> : <PanelRightClose size={18} />}
-            </button>
+            </Button>
           </header>
           <div className="trace-content" hidden={isTraceCollapsed}>
             {traces.length === 0 ? (
@@ -871,32 +979,37 @@ function SQLiteViewer({
       {error ? <p className="viewer-error">{error}</p> : null}
       {isLoading && !tableData ? (
         <div className="viewer-loading">
-          <Loader2 className="spin" size={18} />
+          <Loader size="sm" />
           <span>Loading extracted tables</span>
         </div>
       ) : null}
 
       {analysisTables && analysisTables.tables.length === 0 ? (
-        <div className="viewer-empty">
-          <Database size={24} />
-          <p>No extracted SQLite tables found for this spreadsheet.</p>
-        </div>
+        <Empty
+          className="viewer-empty"
+          icon={<Database size={32} />}
+          size="sm"
+          title="No extracted tables"
+          description="No extracted SQLite tables were found for this spreadsheet."
+        />
       ) : null}
 
       {analysisTables && analysisTables.tables.length > 0 ? (
         <div className="viewer-grid">
           <aside className="table-picker">
             {analysisTables.tables.map((table) => (
-              <button
+              <Button
                 className={selectedTable === table.table_name ? "active" : ""}
                 key={table.table_name}
+                size="sm"
                 type="button"
+                variant={selectedTable === table.table_name ? "primary" : "secondary"}
                 onClick={() => setSelectedTable(table.table_name)}
               >
                 <Table2 size={16} />
                 <span>{table.table_name}</span>
                 <small>{table.row_count} rows</small>
-              </button>
+              </Button>
             ))}
           </aside>
 
@@ -940,26 +1053,33 @@ function RawDocumentViewer({
       {error ? <p className="viewer-error">{error}</p> : null}
       {isLoading && !rawPreview ? (
         <div className="viewer-loading">
-          <Loader2 className="spin" size={18} />
+          <Loader size="sm" />
           <span>Loading raw preview</span>
         </div>
       ) : null}
 
       {rawPreview && rawPreview.preview.sheets.length > 1 ? (
-        <nav className="sheet-tabs" aria-label="Raw spreadsheet sheets">
-          {rawPreview.preview.sheets.map((nextSheet, index) => (
-            <button className={index === activeSheet ? "active" : ""} key={nextSheet.name} type="button" onClick={() => setActiveSheet(index)}>
-              {nextSheet.name}
-            </button>
-          ))}
-        </nav>
+        <Tabs
+          className="sheet-tabs"
+          size="sm"
+          value={String(activeSheet)}
+          variant="segmented"
+          tabs={rawPreview.preview.sheets.map((nextSheet, index) => ({
+            label: nextSheet.name,
+            value: String(index),
+          }))}
+          onValueChange={(value) => setActiveSheet(Number(value))}
+        />
       ) : null}
 
       {rawPreview && !sheet ? (
-        <div className="viewer-empty">
-          <FileText size={24} />
-          <p>No previewable rows were found in the raw spreadsheet.</p>
-        </div>
+        <Empty
+          className="viewer-empty"
+          icon={<FileText size={32} />}
+          size="sm"
+          title="No previewable rows"
+          description="No previewable rows were found in the raw spreadsheet."
+        />
       ) : null}
 
       {sheet ? (
@@ -977,33 +1097,30 @@ function RawDocumentViewer({
 function DataTable({ columns, rows }: { columns: string[]; rows: Record<string, unknown>[] }) {
   if (columns.length === 0 || rows.length === 0) {
     return (
-      <div className="viewer-empty">
-        <Table2 size={24} />
-        <p>No rows to preview.</p>
-      </div>
+      <Empty className="viewer-empty" icon={<Table2 size={32} />} size="sm" title="No rows to preview" />
     );
   }
 
   return (
     <div className="data-table-wrap">
-      <table className="data-table">
-        <thead>
-          <tr>
+      <Table className="data-table">
+        <Table.Header>
+          <Table.Row>
             {columns.map((column) => (
-              <th key={column}>{column}</th>
+              <Table.Head key={column}>{column}</Table.Head>
             ))}
-          </tr>
-        </thead>
-        <tbody>
+          </Table.Row>
+        </Table.Header>
+        <Table.Body>
           {rows.map((row, rowIndex) => (
-            <tr key={rowIndex}>
+            <Table.Row key={rowIndex}>
               {columns.map((column) => (
-                <td key={column}>{cellText(row[column])}</td>
+                <Table.Cell key={column}>{cellText(row[column])}</Table.Cell>
               ))}
-            </tr>
+            </Table.Row>
           ))}
-        </tbody>
-      </table>
+        </Table.Body>
+      </Table>
     </div>
   );
 }
