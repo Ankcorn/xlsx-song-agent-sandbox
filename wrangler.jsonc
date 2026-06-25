@@ -17,11 +17,11 @@
   },
   "vars": {
     // Set AI_GATEWAY_PROVIDER to "openai" or "anthropic" after adding BYOK provider keys in the AI Gateway dashboard.
-    // Use AI_GATEWAY_FALLBACKS for chains like "anthropic:claude-sonnet-4-5,openai:gpt-4.1-mini".
+    // Use AI_GATEWAY_FALLBACKS for chains like "openai:gpt-5.5,workers-ai:@cf/moonshotai/kimi-k2.7-code".
     "AI_GATEWAY_ID": "aigovhack",
-    "AI_GATEWAY_PROVIDER": "workers-ai",
-    "AI_GATEWAY_MODEL": "@cf/moonshotai/kimi-k2.7-code",
-    "AI_GATEWAY_FALLBACKS": "workers-ai:@cf/moonshotai/kimi-k2.7-code,openai:gpt-5.5"
+    "AI_GATEWAY_PROVIDER": "openai",
+    "AI_GATEWAY_MODEL": "gpt-5.5",
+    "AI_GATEWAY_FALLBACKS": "openai:gpt-5.5,workers-ai:@cf/moonshotai/kimi-k2.7-code"
   },
   "d1_databases": [
     {
@@ -55,8 +55,12 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "HackathonAgent",
-        "name": "HackathonAgent"
+        "class_name": "SheetsThink",
+        "name": "SheetsThink"
+      },
+      {
+        "class_name": "AgentThink",
+        "name": "AgentThink"
       },
       {
         "class_name": "Sandbox",
@@ -68,6 +72,10 @@
     {
       "new_sqlite_classes": ["HackathonAgent", "Sandbox"],
       "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["SheetsThink", "AgentThink"],
+      "tag": "v2"
     }
   ]
 }

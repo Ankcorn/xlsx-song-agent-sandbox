@@ -413,6 +413,28 @@ h2 {
   overflow: hidden;
 }
 
+.category-groups {
+  display: grid;
+  gap: 22px;
+}
+
+.category-group {
+  display: grid;
+  gap: 10px;
+}
+
+.category-group > header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.category-group > header span {
+  color: #607086;
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .spreadsheet-row {
   align-items: center;
   display: grid;
@@ -466,6 +488,12 @@ h2 {
   margin-top: 8px;
 }
 
+.attached-sheets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .empty-list,
 .status-line {
   align-items: center;
@@ -491,6 +519,43 @@ h2 {
 .upload-form {
   display: grid;
   gap: 18px;
+}
+
+.form-field {
+  display: grid;
+  gap: 7px;
+}
+
+.form-field span {
+  color: #526176;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.checkbox-group {
+  display: grid;
+  gap: 8px;
+}
+
+.checkbox-row {
+  align-items: center;
+  border: 1px solid #dce2e9;
+  border-radius: 8px;
+  cursor: pointer;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 10px 12px;
+}
+
+.checkbox-row:hover {
+  background: #edf7f5;
+}
+
+.checkbox-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .file-drop {
@@ -828,36 +893,53 @@ h2 {
 .viewer-grid {
   display: grid;
   gap: 16px;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
   min-height: 0;
 }
 
 .table-picker {
   align-content: start;
   display: grid;
-  gap: 8px;
+  gap: 6px;
   max-height: 100%;
   min-width: 0;
   overflow: auto;
+  padding-right: 2px;
 }
 
 .table-picker button {
+  align-items: center;
+  border-radius: 8px;
   display: grid;
-  gap: 4px 8px;
-  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 10px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  justify-items: start;
+  line-height: 1.2;
   max-width: 100%;
+  min-height: 56px;
   min-width: 0;
   overflow: hidden;
-  text-align: left;
+  padding: 8px 12px;
   width: 100%;
 }
 
 .table-picker button.active {
-  box-shadow: inset 3px 0 0 #2f6f73;
+  background: #2f7c7c;
+  color: white;
+}
+
+.table-picker button svg {
+  align-self: start;
+  grid-row: 1 / span 2;
+  margin-top: 2px;
 }
 
 .table-picker span {
+  display: block;
   font-weight: 900;
+  max-width: 100%;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -867,6 +949,11 @@ h2 {
   color: #607086;
   font-weight: 800;
   grid-column: 2;
+  min-width: 0;
+}
+
+.table-picker button.active small {
+  color: rgba(255, 255, 255, 0.72);
 }
 
 .sheet-tabs {
