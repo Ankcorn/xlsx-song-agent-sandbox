@@ -21,6 +21,7 @@ import {
   Plus,
   Send,
   Table2,
+  Trash2,
   Upload,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
@@ -184,6 +185,7 @@ function SpreadsheetListPage() {
   const [spreadsheets, setSpreadsheets] = useState<Spreadsheet[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -220,6 +222,25 @@ function SpreadsheetListPage() {
       setError(message);
     } finally {
       setRetryingId(null);
+    }
+  }
+
+  async function deleteSpreadsheet(spreadsheet: Spreadsheet) {
+    if (deletingId) return;
+    if (!window.confirm(`Delete ${spreadsheet.filename}? This removes the uploaded file and extracted data.`)) return;
+
+    setDeletingId(spreadsheet.id);
+    setError(null);
+
+    try {
+      await fetchJson<{ ok: true }>(`/api/spreadsheets/${spreadsheet.id}`, {
+        method: "DELETE",
+      });
+      setSpreadsheets((current) => current.filter((item) => item.id !== spreadsheet.id));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Delete failed");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -270,21 +291,37 @@ function SpreadsheetListPage() {
                 </p>
                 {spreadsheet.error_message ? <p className="row-error">{spreadsheet.error_message}</p> : null}
               </div>
-              {spreadsheet.status === "failed" ? (
+              <div className="row-actions">
+                {spreadsheet.status === "failed" ? (
+                  <button
+                    className="retry-button"
+                    disabled={retryingId === spreadsheet.id || deletingId === spreadsheet.id}
+                    type="button"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      void retryExtraction(spreadsheet.id);
+                    }}
+                  >
+                    {retryingId === spreadsheet.id ? <Loader2 className="spin" size={16} /> : null}
+                    <span>{retryingId === spreadsheet.id ? "Retrying" : "Retry extraction"}</span>
+                  </button>
+                ) : null}
                 <button
-                  className="retry-button"
-                  disabled={retryingId === spreadsheet.id}
+                  aria-label={`Delete ${spreadsheet.filename}`}
+                  className="delete-button"
+                  disabled={deletingId === spreadsheet.id}
+                  title="Delete spreadsheet"
                   type="button"
                   onClick={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
-                    void retryExtraction(spreadsheet.id);
+                    void deleteSpreadsheet(spreadsheet);
                   }}
                 >
-                  {retryingId === spreadsheet.id ? <Loader2 className="spin" size={16} /> : null}
-                  <span>{retryingId === spreadsheet.id ? "Retrying" : "Retry extraction"}</span>
+                  {deletingId === spreadsheet.id ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
                 </button>
-              ) : null}
+              </div>
             </Link>
           ))}
         </div>

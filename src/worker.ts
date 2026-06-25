@@ -856,6 +856,34 @@ async function retrySpreadsheetExtraction(env: Env, spreadsheetId: string) {
   }
 }
 
+async function deleteSpreadsheet(env: Env, spreadsheetId: string) {
+  const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
+  if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+
+  const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(spreadsheet.agent_name));
+  const cleanupResponse = await stub.fetch("https://agent.local/delete-spreadsheet", {
+    body: JSON.stringify({ spreadsheetId: spreadsheet.id }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
+  if (!cleanupResponse.ok) {
+    throw new Error((await cleanupResponse.text()) || "Failed to clean up spreadsheet agent data.");
+  }
+
+  if (spreadsheet.r2_key) {
+    await env.SPREADSHEETS.delete(spreadsheet.r2_key);
+  }
+
+  await env.DB.prepare("DELETE FROM spreadsheets WHERE id = ?").bind(spreadsheet.id).run();
+
+  if (spreadsheet.sandbox_path) {
+    await getSandbox(env.Sandbox, `sandbox-${spreadsheet.id}`).destroy().catch(() => undefined);
+    await getSandbox(env.Sandbox, `preview-${spreadsheet.id}`).destroy().catch(() => undefined);
+  }
+
+  return json({ ok: true });
+}
+
 export class ExtractionWorkflow extends WorkflowEntrypoint<Env, ExtractionWorkflowParams> {
   async run(event: WorkflowEvent<ExtractionWorkflowParams>, step: WorkflowStep) {
     const payload = event.payload;
@@ -1310,6 +1338,19 @@ export class HackathonAgent extends Think<Env> {
       } finally {
         await getSandbox(this.env.Sandbox, `sandbox-${body.spreadsheetId}`).destroy().catch(() => undefined);
       }
+    }
+
+    if (url.pathname.endsWith("/delete-spreadsheet") && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as {
+        spreadsheetId?: unknown;
+      };
+
+      if (typeof body.spreadsheetId !== "string") {
+        return new Response("Invalid spreadsheet delete payload.", { status: 400 });
+      }
+
+      this.deleteSpreadsheetData(body.spreadsheetId);
+      return json({ ok: true });
     }
 
     return super.onRequest(request);
@@ -1910,6 +1951,23 @@ export class HackathonAgent extends Think<Env> {
     });
   }
 
+  private deleteSpreadsheetData(spreadsheetId: string) {
+    this.ensureFileSchema();
+    this.ensureTraceSchema();
+    const tables = this.sql<{ table_name: string }>`
+      SELECT table_name FROM document_tables WHERE spreadsheet_id = ${spreadsheetId}
+    `;
+
+    for (const table of tables) {
+      this.ctx.storage.sql.exec(`DROP TABLE IF EXISTS ${this.quoteIdentifier(table.table_name)}`);
+    }
+
+    this.sql`DELETE FROM document_tables WHERE spreadsheet_id = ${spreadsheetId}`;
+    this.sql`DELETE FROM document_analysis WHERE spreadsheet_id = ${spreadsheetId}`;
+    this.sql`DELETE FROM agent_spreadsheet_files WHERE spreadsheet_id = ${spreadsheetId}`;
+    this.sql`DELETE FROM agent_traces`;
+  }
+
   private listTraces(since?: string | null) {
     this.ensureTraceSchema();
     if (since) {
@@ -2023,6 +2081,11 @@ export default {
     const spreadsheetRetryExtractionMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/retry-extraction$/);
     if (spreadsheetRetryExtractionMatch && request.method === "POST") {
       return retrySpreadsheetExtraction(env, spreadsheetRetryExtractionMatch[1]);
+    }
+
+    const spreadsheetDeleteMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)$/);
+    if (spreadsheetDeleteMatch && request.method === "DELETE") {
+      return deleteSpreadsheet(env, spreadsheetDeleteMatch[1]);
     }
 
     const spreadsheetTablesMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/tables$/);
