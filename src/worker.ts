@@ -22,8 +22,11 @@ type SpreadsheetRow = {
   content_type: string;
   size_bytes: number;
   agent_name: string;
+  error_message: string | null;
   r2_key: string | null;
   sandbox_path: string | null;
+  status: "processing" | "ready" | "failed";
+  updated_at: string;
   uploaded_at: string;
 };
 
@@ -266,9 +269,9 @@ function isSpreadsheetFile(file: File) {
 async function listSpreadsheets(env: Env) {
   const { results } = await env.DB.prepare(
     [
-      "SELECT id, filename, content_type, size_bytes, agent_name, r2_key, sandbox_path, uploaded_at",
+      "SELECT id, filename, content_type, size_bytes, agent_name, r2_key, sandbox_path, status, error_message, uploaded_at, updated_at",
       "FROM spreadsheets",
-      "ORDER BY uploaded_at DESC",
+      "ORDER BY updated_at DESC",
     ].join(" "),
   ).all<SpreadsheetRow>();
 
@@ -284,7 +287,7 @@ async function getSpreadsheet(env: Env, id: string) {
 async function getSpreadsheetRow(env: Env, id: string) {
   const spreadsheet = await env.DB.prepare(
     [
-      "SELECT id, filename, content_type, size_bytes, agent_name, r2_key, sandbox_path, uploaded_at",
+      "SELECT id, filename, content_type, size_bytes, agent_name, r2_key, sandbox_path, status, error_message, uploaded_at, updated_at",
       "FROM spreadsheets",
       "WHERE id = ?",
     ].join(" "),
@@ -316,6 +319,26 @@ async function uploadSpreadsheet(request: Request, env: Env) {
   const fileBuffer = await file.arrayBuffer();
   const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(agentName));
 
+  await env.DB.prepare(
+    [
+      "INSERT INTO spreadsheets",
+      "(id, filename, content_type, size_bytes, agent_name, r2_key, sandbox_path, status, error_message, updated_at)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?, 'processing', NULL, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+      "ON CONFLICT(id) DO UPDATE SET",
+      "filename = excluded.filename,",
+      "content_type = excluded.content_type,",
+      "size_bytes = excluded.size_bytes,",
+      "agent_name = excluded.agent_name,",
+      "r2_key = excluded.r2_key,",
+      "sandbox_path = excluded.sandbox_path,",
+      "status = 'processing',",
+      "error_message = NULL,",
+      "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+    ].join(" "),
+  )
+    .bind(id, file.name, file.type || "application/octet-stream", file.size, agentName, r2Key, sandboxPath)
+    .run();
+
   await stub.fetch("https://agent.local/upload-trace", {
     body: JSON.stringify({
       detail: { filename: file.name, sizeBytes: file.size },
@@ -327,65 +350,101 @@ async function uploadSpreadsheet(request: Request, env: Env) {
     method: "POST",
   });
 
-  await sandbox.mkdir(`/workspace/spreadsheets/${id}`, { recursive: true });
-  await sandbox.writeFile(sandboxPath, arrayBufferToBase64(fileBuffer), {
-    encoding: "base64",
-  });
-  await env.SPREADSHEETS.put(r2Key, fileBuffer, {
-    httpMetadata: {
-      contentType: file.type || "application/octet-stream",
-    },
-    customMetadata: {
-      filename: file.name,
-      spreadsheetId: id,
-    },
-  });
+  try {
+    await env.SPREADSHEETS.put(r2Key, fileBuffer, {
+      httpMetadata: {
+        contentType: file.type || "application/octet-stream",
+      },
+      customMetadata: {
+        filename: file.name,
+        spreadsheetId: id,
+      },
+    });
 
-  await stub.fetch("https://agent.local/upload-trace", {
-    body: JSON.stringify({
-      detail: { sandboxPath },
-      spanType: "upload",
-      status: "done",
-      title: "Stored file in sandbox",
-    }),
-    headers: { "content-type": "application/json" },
-    method: "POST",
-  });
+    await stub.fetch("https://agent.local/upload-trace", {
+      body: JSON.stringify({
+        detail: { r2Key },
+        spanType: "upload",
+        status: "done",
+        title: "Stored file in R2",
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
 
-  const fileResponse = await stub.fetch("https://agent.local/spreadsheet-file", {
-    body: JSON.stringify({
-      contentType: file.type || "application/octet-stream",
-      filename: file.name,
-      r2Key,
-      sandboxPath,
-      sizeBytes: file.size,
-      spreadsheetId: id,
-    }),
-    headers: { "content-type": "application/json" },
-    method: "POST",
-  });
-  if (!fileResponse.ok) throw new Error((await fileResponse.text()) || "Failed to persist spreadsheet file.");
+    await sandbox.mkdir(`/workspace/spreadsheets/${id}`, { recursive: true });
+    await sandbox.writeFile(sandboxPath, arrayBufferToBase64(fileBuffer), {
+      encoding: "base64",
+    });
 
-  const analysisResponse = await stub.fetch("https://agent.local/analyze-spreadsheet-file", {
-    body: JSON.stringify({
-      filename: file.name,
-      sandboxPath,
-      spreadsheetId: id,
-    }),
-    headers: { "content-type": "application/json" },
-    method: "POST",
-  });
-  if (!analysisResponse.ok) throw new Error((await analysisResponse.text()) || "Failed to analyze spreadsheet file.");
+    await stub.fetch("https://agent.local/upload-trace", {
+      body: JSON.stringify({
+        detail: { sandboxPath },
+        spanType: "upload",
+        status: "done",
+        title: "Stored file in sandbox",
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
 
-  await env.DB.prepare(
-    [
-      "INSERT INTO spreadsheets",
-      "(id, filename, content_type, size_bytes, agent_name, r2_key, sandbox_path)",
-      "VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ].join(" "),
-  )
-    .bind(id, file.name, file.type || "application/octet-stream", file.size, agentName, r2Key, sandboxPath)
-    .run();
+    const fileResponse = await stub.fetch("https://agent.local/spreadsheet-file", {
+      body: JSON.stringify({
+        contentType: file.type || "application/octet-stream",
+        filename: file.name,
+        r2Key,
+        sandboxPath,
+        sizeBytes: file.size,
+        spreadsheetId: id,
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    if (!fileResponse.ok) throw new Error((await fileResponse.text()) || "Failed to persist spreadsheet file.");
+
+    const analysisResponse = await stub.fetch("https://agent.local/analyze-spreadsheet-file", {
+      body: JSON.stringify({
+        filename: file.name,
+        sandboxPath,
+        spreadsheetId: id,
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    if (!analysisResponse.ok) throw new Error((await analysisResponse.text()) || "Failed to analyze spreadsheet file.");
+
+    await env.DB.prepare(
+      [
+        "UPDATE spreadsheets",
+        "SET status = 'ready', error_message = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        "WHERE id = ?",
+      ].join(" "),
+    )
+      .bind(id)
+      .run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Upload failed";
+    await env.DB.prepare(
+      [
+        "UPDATE spreadsheets",
+        "SET status = 'failed', error_message = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        "WHERE id = ?",
+      ].join(" "),
+    )
+      .bind(message, id)
+      .run();
+    await stub.fetch("https://agent.local/upload-trace", {
+      body: JSON.stringify({
+        detail: message,
+        spanType: "upload",
+        status: "error",
+        title: "Upload failed",
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    throw error;
+  }
 
   return json(
     {

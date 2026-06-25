@@ -19,8 +19,10 @@ type Spreadsheet = {
   id: string;
   filename: string;
   content_type: string;
+  error_message?: string | null;
   size_bytes: number;
   agent_name: string;
+  status?: "processing" | "ready" | "failed";
   uploaded_at?: string;
 };
 
@@ -158,7 +160,7 @@ function SpreadsheetListPage() {
         <div className="spreadsheet-list">
           {spreadsheets.map((spreadsheet) => (
             <Link
-              className="spreadsheet-row"
+              className={`spreadsheet-row ${spreadsheet.status === "failed" ? "failed" : ""}`}
               key={spreadsheet.id}
               params={{ spreadsheetId: spreadsheet.id }}
               to="/spreadsheets/$spreadsheetId"
@@ -167,8 +169,9 @@ function SpreadsheetListPage() {
               <div>
                 <h2>{spreadsheet.filename}</h2>
                 <p>
-                  {formatBytes(spreadsheet.size_bytes)} · {spreadsheet.agent_name}
+                  {formatBytes(spreadsheet.size_bytes)} · {spreadsheet.status ?? "ready"} · {spreadsheet.agent_name}
                 </p>
+                {spreadsheet.error_message ? <p className="row-error">{spreadsheet.error_message}</p> : null}
               </div>
             </Link>
           ))}

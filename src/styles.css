@@ -149,9 +149,18 @@ h2 {
   background: #edf7f5;
 }
 
+.spreadsheet-row.failed {
+  background: #fff7f5;
+}
+
 .spreadsheet-row p {
   color: #607086;
   margin-top: 4px;
+}
+
+.spreadsheet-row .row-error {
+  color: #b42318;
+  font-weight: 800;
 }
 
 .empty-list,
