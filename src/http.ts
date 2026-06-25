@@ -1669,6 +1669,10 @@ export class SheetsThink extends Think<Env> {
       return json({ traces: this.listTraces(url.searchParams.get("since")) });
     }
 
+    if (url.pathname.endsWith("/extraction-trace")) {
+      return json({ traces: this.listExtractionTraces() });
+    }
+
     if (url.pathname.endsWith("/analysis-tables") && request.method === "GET") {
       return json(this.listAnalysisTables());
     }
@@ -2677,6 +2681,16 @@ export class SheetsThink extends Think<Env> {
     `.reverse();
   }
 
+  private listExtractionTraces() {
+    this.ensureTraceSchema();
+    return this.sql`
+      SELECT id, request_id, span_type, title, status, detail, step_number, duration_ms, created_at
+      FROM agent_traces
+      WHERE span_type IN ('upload', 'ingestion')
+      ORDER BY created_at ASC
+    `;
+  }
+
   private recordTrace(input: TraceInput) {
     this.ensureTraceSchema();
     const trace: AgentTraceEvent = {
@@ -2811,6 +2825,7 @@ export class AgentThink extends Think<Env> {
   async onRequest(request: Request) {
     const url = new URL(request.url);
     if (url.pathname.endsWith("/traces")) return json({ traces: this.listTraces(url.searchParams.get("since")) });
+    if (url.pathname.endsWith("/extraction-trace")) return json({ traces: this.listExtractionTraces() });
     if (url.pathname.endsWith("/agent-database") && request.method === "GET") return json(this.listAgentDatabaseTables());
     if (url.pathname.endsWith("/agent-table") && request.method === "GET") {
       const tableName = url.searchParams.get("table");
@@ -3214,6 +3229,16 @@ export class AgentThink extends Think<Env> {
     `.reverse();
   }
 
+  private listExtractionTraces() {
+    this.ensureTraceSchema();
+    return this.sql`
+      SELECT id, request_id, span_type, title, status, detail, step_number, duration_ms, created_at
+      FROM agent_traces
+      WHERE span_type IN ('upload', 'ingestion')
+      ORDER BY created_at ASC
+    `;
+  }
+
   private recordTrace(input: TraceInput) {
     this.ensureTraceSchema();
     const trace: AgentTraceEvent = {
@@ -3324,6 +3349,14 @@ export default {
       return stub.fetch(new Request(traceUrl, request));
     }
 
+    const agentExtractionTraceMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/extraction-trace$/);
+    if (agentExtractionTraceMatch && request.method === "GET") {
+      const agent = await getLibraryAgentRow(env, agentExtractionTraceMatch[1]);
+      if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+      const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
+      return stub.fetch("https://agent.local/extraction-trace");
+    }
+
     const agentMatch = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
     if (agentMatch && request.method === "GET") {
       return getLibraryAgent(env, agentMatch[1]);
@@ -3396,6 +3429,14 @@ export default {
       const traceUrl = new URL(request.url);
       traceUrl.pathname = "/traces";
       return stub.fetch(new Request(traceUrl, request));
+    }
+
+    const spreadsheetExtractionTraceMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/extraction-trace$/);
+    if (spreadsheetExtractionTraceMatch && request.method === "GET") {
+      const spreadsheet = await getSpreadsheetRow(env, spreadsheetExtractionTraceMatch[1]);
+      if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+      const stub = env.SheetsThink.get(env.SheetsThink.idFromName(spreadsheet.agent_name));
+      return stub.fetch("https://agent.local/extraction-trace");
     }
 
     const spreadsheetMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)$/);

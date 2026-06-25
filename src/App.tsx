@@ -17,6 +17,7 @@ import {
   BarChart3,
   Clock,
   Database,
+  Download,
   FileSpreadsheet,
   FileText,
   Gauge,
@@ -262,6 +263,22 @@ function isAgentTraceMessage(value: unknown): value is AgentTraceMessage {
     value.type === "agent_trace" &&
     "trace" in value
   );
+}
+
+function downloadJsonFile(filename: string, data: unknown) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function safeDownloadName(value: string) {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "agent";
 }
 
 function extractionLabel(spreadsheet: Spreadsheet) {
@@ -976,6 +993,16 @@ function ChatSurface({
     }
   }
 
+  async function downloadExtractionTrace() {
+    const data = await fetchJson<AgentTraceResponse>(`/api/spreadsheets/${spreadsheet.id}/extraction-trace`);
+    downloadJsonFile(`${safeDownloadName(spreadsheet.filename)}-extraction-trace.json`, {
+      agentName: spreadsheet.agent_name,
+      filename: spreadsheet.filename,
+      spreadsheetId: spreadsheet.id,
+      traces: data.traces,
+    });
+  }
+
   return (
     <section className="chat-page">
       <header className="chat-header">
@@ -1082,18 +1109,32 @@ function ChatSurface({
               <p className="eyebrow">Trace</p>
               <h2>Agent steps</h2>
             </div>
-            <Button
-              aria-label={isTraceCollapsed ? "Expand trace panel" : "Collapse trace panel"}
-              className="trace-toggle"
-              shape="square"
-              size="sm"
-              onClick={() => setIsTraceCollapsed((value) => !value)}
-              title={isTraceCollapsed ? "Expand trace panel" : "Collapse trace panel"}
-              type="button"
-              variant="secondary"
-            >
-              {isTraceCollapsed ? <PanelRightOpen size={18} /> : <PanelRightClose size={18} />}
-            </Button>
+            <div className="trace-actions">
+              <Button
+                aria-label="Download extraction trace"
+                className="trace-toggle"
+                shape="square"
+                size="sm"
+                onClick={() => void downloadExtractionTrace()}
+                title="Download extraction trace"
+                type="button"
+                variant="secondary"
+              >
+                <Download size={18} />
+              </Button>
+              <Button
+                aria-label={isTraceCollapsed ? "Expand trace panel" : "Collapse trace panel"}
+                className="trace-toggle"
+                shape="square"
+                size="sm"
+                onClick={() => setIsTraceCollapsed((value) => !value)}
+                title={isTraceCollapsed ? "Expand trace panel" : "Collapse trace panel"}
+                type="button"
+                variant="secondary"
+              >
+                {isTraceCollapsed ? <PanelRightOpen size={18} /> : <PanelRightClose size={18} />}
+              </Button>
+            </div>
           </header>
           <div className="trace-content" hidden={isTraceCollapsed}>
             {traces.length === 0 ? (
@@ -1518,6 +1559,17 @@ function AgentChatPage() {
     setInput("");
   }
 
+  async function downloadExtractionTrace() {
+    if (!agentRecord) return;
+    const data = await fetchJson<AgentTraceResponse>(`/api/agents/${agentId}/extraction-trace`);
+    downloadJsonFile(`${safeDownloadName(agentRecord.name)}-extraction-trace.json`, {
+      agentId,
+      agentName: agentRecord.agent_name,
+      name: agentRecord.name,
+      traces: data.traces,
+    });
+  }
+
   if (error) return <section className="content-band"><Link to="/agents" className="back-link"><ArrowLeft size={18} /><span>Agents</span></Link><Banner variant="error" title="Could not load agent" description={error} /></section>;
   if (!agentRecord) return <section className="content-band"><div className="status-line"><Loader size="sm" /><span>Loading agent</span></div></section>;
 
@@ -1550,7 +1602,21 @@ function AgentChatPage() {
           </form>
         </div>
         <aside className="trace-panel">
-          <header><div className="trace-heading"><p className="eyebrow">Trace</p><h2>Agent steps</h2></div></header>
+          <header>
+            <div className="trace-heading"><p className="eyebrow">Trace</p><h2>Agent steps</h2></div>
+            <Button
+              aria-label="Download extraction trace"
+              className="trace-toggle"
+              shape="square"
+              size="sm"
+              onClick={() => void downloadExtractionTrace()}
+              title="Download extraction trace"
+              type="button"
+              variant="secondary"
+            >
+              <Download size={18} />
+            </Button>
+          </header>
           <div className="trace-content">
             {traces.length === 0 ? <p className="trace-empty">No agent steps yet.</p> : (
               <ol className="trace-list">
