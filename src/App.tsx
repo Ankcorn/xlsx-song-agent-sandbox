@@ -21,6 +21,7 @@ import {
   FileSpreadsheet,
   FileText,
   Gauge,
+  History,
   Layers3,
   PanelRightClose,
   PanelRightOpen,
@@ -56,6 +57,29 @@ type SpreadsheetResponse = {
 
 type SpreadsheetListResponse = {
   spreadsheets: Spreadsheet[];
+};
+
+type SpreadsheetRevision = {
+  id: string;
+  spreadsheet_id: string;
+  revision_number: number;
+  action: "upload" | "revision_upload";
+  filename: string;
+  r2_key: string;
+  size_bytes: number;
+  content_type: string;
+  summary: string | null;
+  created_at: string;
+};
+
+type SpreadsheetRevisionsResponse = {
+  revisions: SpreadsheetRevision[];
+  spreadsheet: Spreadsheet;
+};
+
+type SpreadsheetRevisionUploadResponse = {
+  revision: SpreadsheetRevision | null;
+  spreadsheet: Spreadsheet | null;
 };
 
 type LibraryAgent = {
@@ -140,7 +164,7 @@ type RawPreviewResponse = {
   };
 };
 
-type AgentView = "chat" | "sqlite" | "raw";
+type AgentView = "chat" | "sqlite" | "raw" | "revisions";
 
 type RenderedMessage = {
   id: string;
@@ -322,6 +346,13 @@ function formatSeconds(seconds: number | null | undefined) {
 
 function formatNumber(value: number | null | undefined) {
   return value === null || value === undefined ? "n/a" : value.toLocaleString();
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
 }
 
 function average(values: Array<number | null | undefined>) {
@@ -934,9 +965,12 @@ function ChatSurface({
   const [selectedTable, setSelectedTable] = useState<string | null>(null);
   const [tableData, setTableData] = useState<AnalysisTableResponse | null>(null);
   const [rawPreview, setRawPreview] = useState<RawPreviewResponse | null>(null);
+  const [revisions, setRevisions] = useState<SpreadsheetRevision[] | null>(null);
+  const [revisionFile, setRevisionFile] = useState<File | null>(null);
   const [viewerError, setViewerError] = useState<string | null>(null);
   const [isViewerLoading, setIsViewerLoading] = useState(false);
   const [isRetryingExtraction, setIsRetryingExtraction] = useState(false);
+  const [isUploadingRevision, setIsUploadingRevision] = useState(false);
   const [renderedMessages, setRenderedMessages] = useState<RenderedMessage[]>([]);
 
   useEffect(() => {
@@ -1046,6 +1080,31 @@ function ChatSurface({
     };
   }, [activeView, rawPreview, spreadsheet.id]);
 
+  useEffect(() => {
+    if (activeView !== "revisions" || revisions) return;
+
+    let isMounted = true;
+    setIsViewerLoading(true);
+    setViewerError(null);
+
+    fetchJson<SpreadsheetRevisionsResponse>(`/api/spreadsheets/${spreadsheet.id}/revisions`)
+      .then((data) => {
+        if (!isMounted) return;
+        setRevisions(data.revisions);
+        setSpreadsheet(data.spreadsheet);
+      })
+      .catch((caught: Error) => {
+        if (isMounted) setViewerError(caught.message);
+      })
+      .finally(() => {
+        if (isMounted) setIsViewerLoading(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [activeView, revisions, setSpreadsheet, spreadsheet.id]);
+
   function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = input.trim();
@@ -1075,6 +1134,37 @@ function ChatSurface({
       setSpreadsheet({ ...spreadsheet, error_message: message, status: "failed" });
     } finally {
       setIsRetryingExtraction(false);
+    }
+  }
+
+  async function uploadRevision(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!revisionFile || isUploadingRevision) return;
+
+    setIsUploadingRevision(true);
+    setViewerError(null);
+
+    const formData = new FormData();
+    formData.append("spreadsheet", revisionFile);
+    formData.append("preExtract", spreadsheet.pre_extract === 0 ? "false" : "true");
+
+    try {
+      const data = await fetchJson<SpreadsheetRevisionUploadResponse>(`/api/spreadsheets/${spreadsheet.id}/revisions`, {
+        body: formData,
+        method: "POST",
+      });
+      if (data.spreadsheet) setSpreadsheet(data.spreadsheet);
+      if (data.revision) setRevisions((current) => [data.revision!, ...(current ?? [])]);
+      setAnalysisTables(null);
+      setSelectedTable(null);
+      setTableData(null);
+      setRawPreview(null);
+      setRevisionFile(null);
+      setActiveView("revisions");
+    } catch (caught) {
+      setViewerError(caught instanceof Error ? caught.message : "Revision upload failed");
+    } finally {
+      setIsUploadingRevision(false);
     }
   }
 
@@ -1124,6 +1214,7 @@ function ChatSurface({
             { label: <span className="tab-label"><FileSpreadsheet size={16} /> Chat</span>, value: "chat" },
             { label: <span className="tab-label"><Database size={16} /> SQLite</span>, value: "sqlite" },
             { label: <span className="tab-label"><FileText size={16} /> Raw</span>, value: "raw" },
+            { label: <span className="tab-label"><History size={16} /> Revisions</span>, value: "revisions" },
           ]}
           onValueChange={(value) => setActiveView(value as AgentView)}
         />
@@ -1163,8 +1254,18 @@ function ChatSurface({
               setSelectedTable={setSelectedTable}
               tableData={tableData}
             />
-          ) : (
+          ) : activeView === "raw" ? (
             <RawDocumentViewer error={viewerError} isLoading={isViewerLoading} rawPreview={rawPreview} />
+          ) : (
+            <RevisionViewer
+              error={viewerError}
+              isLoading={isViewerLoading}
+              isUploading={isUploadingRevision}
+              revisionFile={revisionFile}
+              revisions={revisions}
+              setRevisionFile={setRevisionFile}
+              uploadRevision={uploadRevision}
+            />
           )}
 
           <form className="composer" onSubmit={submitMessage}>
@@ -1394,6 +1495,103 @@ function RawDocumentViewer({
             Object.fromEntries(Array.from({ length: sheet.columns }, (_, index) => [`Column ${index + 1}`, row[index] ?? ""])),
           )}
         />
+      ) : null}
+    </section>
+  );
+}
+
+function RevisionViewer({
+  error,
+  isLoading,
+  isUploading,
+  revisionFile,
+  revisions,
+  setRevisionFile,
+  uploadRevision,
+}: {
+  error: string | null;
+  isLoading: boolean;
+  isUploading: boolean;
+  revisionFile: File | null;
+  revisions: SpreadsheetRevision[] | null;
+  setRevisionFile: (file: File | null) => void;
+  uploadRevision: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <section className="data-viewer revisions-viewer">
+      <header className="viewer-header">
+        <div>
+          <p className="eyebrow">Revision history</p>
+          <h2>{revisions ? `${revisions.length} stored version${revisions.length === 1 ? "" : "s"}` : "Stored versions"}</h2>
+        </div>
+        <form className="revision-upload" onSubmit={uploadRevision}>
+          <label className="revision-file-input">
+            <Upload size={16} />
+            <span>{revisionFile ? revisionFile.name : "Select file"}</span>
+            <input
+              type="file"
+              accept=".xlsx,.xls,.csv,.tsv,.ods,.xml"
+              onChange={(event) => setRevisionFile(event.currentTarget.files?.[0] ?? null)}
+            />
+          </label>
+          <Button disabled={!revisionFile || isUploading} loading={isUploading} size="sm" type="submit" variant="primary">
+            <Upload size={16} />
+            <span>Upload revision</span>
+          </Button>
+        </form>
+      </header>
+
+      {error ? <p className="viewer-error">{error}</p> : null}
+      {isLoading && !revisions ? (
+        <div className="viewer-loading">
+          <Loader size="sm" />
+          <span>Loading revisions</span>
+        </div>
+      ) : null}
+
+      {revisions && revisions.length === 0 ? (
+        <Empty
+          className="viewer-empty"
+          icon={<History size={32} />}
+          size="sm"
+          title="No revisions yet"
+          description="Upload a revised spreadsheet to start the history."
+        />
+      ) : null}
+
+      {revisions && revisions.length > 0 ? (
+        <ol className="revision-list">
+          {revisions.map((revision) => (
+            <li className="revision-item" key={revision.id}>
+              <div className="revision-number">
+                <span>v{revision.revision_number}</span>
+              </div>
+              <article>
+                <div className="revision-title-row">
+                  <h3>{revision.filename}</h3>
+                  <Badge variant={revision.action === "upload" ? "success" : "neutral"}>
+                    {revision.action === "upload" ? "Initial upload" : "Revision"}
+                  </Badge>
+                </div>
+                <p>{revision.summary ?? "Spreadsheet revision stored."}</p>
+                <dl className="revision-meta">
+                  <div>
+                    <dt>Created</dt>
+                    <dd>{formatDateTime(revision.created_at)}</dd>
+                  </div>
+                  <div>
+                    <dt>Size</dt>
+                    <dd>{formatBytes(revision.size_bytes)}</dd>
+                  </div>
+                  <div>
+                    <dt>Type</dt>
+                    <dd>{contentTypeLabel(revision.content_type)}</dd>
+                  </div>
+                </dl>
+              </article>
+            </li>
+          ))}
+        </ol>
       ) : null}
     </section>
   );
