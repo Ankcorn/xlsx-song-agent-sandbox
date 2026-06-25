@@ -21,6 +21,7 @@ import {
   FileSpreadsheet,
   FileText,
   Gauge,
+  Layers3,
   PanelRightClose,
   PanelRightOpen,
   Plus,
@@ -188,6 +189,8 @@ type BenchmarkRun = {
   outputTokens: number | null;
 };
 
+type LibraryGroupMode = "category" | "status" | "extraction" | "type";
+
 function textFromMessage(message: unknown) {
   if (typeof message !== "object" || message === null) return "";
   const candidate = message as {
@@ -285,6 +288,20 @@ function extractionLabel(spreadsheet: Spreadsheet) {
   return spreadsheet.pre_extract === 0 ? "Just uploaded" : "Pre-extracted";
 }
 
+function contentTypeLabel(contentType: string) {
+  if (contentType.includes("csv")) return "CSV";
+  if (contentType.includes("spreadsheet") || contentType.includes("excel") || contentType.includes("sheet")) return "Spreadsheet";
+  if (contentType.includes("xml")) return "XML";
+  return contentType || "Unknown";
+}
+
+function spreadsheetGroupLabel(spreadsheet: Spreadsheet, groupMode: LibraryGroupMode) {
+  if (groupMode === "status") return spreadsheet.status ?? "ready";
+  if (groupMode === "extraction") return extractionLabel(spreadsheet);
+  if (groupMode === "type") return contentTypeLabel(spreadsheet.content_type);
+  return spreadsheet.category || "Uncategorised";
+}
+
 function statusVariant(status?: Spreadsheet["status"]) {
   if (status === "ready") return "success";
   if (status === "failed") return "error";
@@ -376,13 +393,32 @@ function SpreadsheetListPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
-  const groupedSpreadsheets = spreadsheets.reduce<Array<{ category: string; items: Spreadsheet[] }>>((groups, spreadsheet) => {
-    const category = spreadsheet.category || "Uncategorised";
-    const group = groups.find((item) => item.category === category);
+  const [query, setQuery] = useState("");
+  const [groupMode, setGroupMode] = useState<LibraryGroupMode>("category");
+  const filteredSpreadsheets = spreadsheets.filter((spreadsheet) => {
+    const haystack = [
+      spreadsheet.filename,
+      spreadsheet.category,
+      spreadsheet.content_type,
+      spreadsheet.agent_name,
+      spreadsheet.status,
+      extractionLabel(spreadsheet),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(query.trim().toLowerCase());
+  });
+  const groupedSpreadsheets = filteredSpreadsheets.reduce<Array<{ label: string; items: Spreadsheet[] }>>((groups, spreadsheet) => {
+    const label = spreadsheetGroupLabel(spreadsheet, groupMode);
+    const group = groups.find((item) => item.label === label);
     if (group) group.items.push(spreadsheet);
-    else groups.push({ category, items: [spreadsheet] });
+    else groups.push({ label, items: [spreadsheet] });
     return groups;
   }, []);
+  const readyCount = spreadsheets.filter((spreadsheet) => spreadsheet.status === "ready" || !spreadsheet.status).length;
+  const failedCount = spreadsheets.filter((spreadsheet) => spreadsheet.status === "failed").length;
+  const preExtractedCount = spreadsheets.filter((spreadsheet) => spreadsheet.pre_extract !== 0).length;
 
   useEffect(() => {
     fetchJson<SpreadsheetListResponse>("/api/spreadsheets")
@@ -453,6 +489,46 @@ function SpreadsheetListPage() {
         </Link>
       </header>
 
+      <section className="library-summary">
+        <article>
+          <Layers3 size={18} />
+          <span>Total sheets</span>
+          <strong>{spreadsheets.length}</strong>
+        </article>
+        <article>
+          <FileSpreadsheet size={18} />
+          <span>Ready</span>
+          <strong>{readyCount}</strong>
+        </article>
+        <article>
+          <Database size={18} />
+          <span>Pre-extracted</span>
+          <strong>{preExtractedCount}</strong>
+        </article>
+        <article>
+          <Trash2 size={18} />
+          <span>Failed</span>
+          <strong>{failedCount}</strong>
+        </article>
+      </section>
+
+      <section className="library-controls">
+        <label className="library-search">
+          <Search size={18} />
+          <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search filename, category, type, status..." />
+        </label>
+        <Tabs
+          tabs={[
+            { label: "Category", value: "category" },
+            { label: "Status", value: "status" },
+            { label: "Extraction", value: "extraction" },
+            { label: "Type", value: "type" },
+          ]}
+          value={groupMode}
+          onValueChange={(value) => setGroupMode(value as LibraryGroupMode)}
+        />
+      </section>
+
       {isLoading ? (
         <div className="status-line">
           <Loader size="sm" />
@@ -473,12 +549,19 @@ function SpreadsheetListPage() {
             </Link>
           }
         />
+      ) : filteredSpreadsheets.length === 0 ? (
+        <Empty
+          className="empty-list"
+          icon={<Search size={42} />}
+          title="No matching sheets"
+          description="Adjust the search text or grouping filter."
+        />
       ) : (
         <div className="category-groups">
           {groupedSpreadsheets.map((group) => (
-            <section className="category-group" key={group.category}>
+            <section className="category-group" key={group.label}>
               <header>
-                <h2>{group.category}</h2>
+                <h2>{group.label}</h2>
                 <span>{group.items.length} sheets</span>
               </header>
               <div className="spreadsheet-list">
@@ -493,13 +576,15 @@ function SpreadsheetListPage() {
                     <div>
                       <h2>{spreadsheet.filename}</h2>
                       <p>
-                        {formatBytes(spreadsheet.size_bytes)} · {spreadsheet.agent_name}
+                        {formatBytes(spreadsheet.size_bytes)} · {contentTypeLabel(spreadsheet.content_type)} · {spreadsheet.agent_name}
                       </p>
                       <div className="row-badges">
+                        <Badge variant="neutral">{spreadsheet.category || "Uncategorised"}</Badge>
                         <Badge appearance="dot" variant={statusVariant(spreadsheet.status)}>
                           {spreadsheet.status ?? "ready"}
                         </Badge>
                         <Badge variant={spreadsheet.pre_extract === 0 ? "neutral" : "teal-subtle"}>{extractionLabel(spreadsheet)}</Badge>
+                        {spreadsheet.uploaded_at ? <Badge variant="neutral">{new Date(spreadsheet.uploaded_at).toLocaleDateString()}</Badge> : null}
                       </div>
                       {spreadsheet.error_message ? <p className="row-error">{spreadsheet.error_message}</p> : null}
                     </div>

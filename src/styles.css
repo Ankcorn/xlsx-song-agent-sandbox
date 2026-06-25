@@ -406,6 +406,72 @@ h2 {
   margin-top: 6px;
 }
 
+.library-summary {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 18px;
+}
+
+.library-summary article {
+  background: white;
+  border: 1px solid #dce2e9;
+  border-radius: 8px;
+  display: grid;
+  gap: 7px;
+  min-height: 112px;
+  padding: 16px;
+}
+
+.library-summary svg {
+  color: #2f6f73;
+}
+
+.library-summary span {
+  color: #607086;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.library-summary strong {
+  color: #17202a;
+  font-size: 26px;
+  line-height: 1;
+}
+
+.library-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  margin-bottom: 22px;
+}
+
+.library-search {
+  align-items: center;
+  background: white;
+  border: 1px solid #cbd4df;
+  border-radius: 8px;
+  color: #607086;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr);
+  max-width: 520px;
+  min-height: 44px;
+  padding: 0 12px;
+  width: min(100%, 520px);
+}
+
+.library-search .ui-input {
+  border: 0;
+  padding: 0;
+}
+
+.library-search .ui-input:focus {
+  outline: 0;
+}
+
 .spreadsheet-list {
   background: white;
   border: 1px solid #dce2e9;
@@ -1563,6 +1629,20 @@ h2 {
 
   .nav-actions {
     justify-content: flex-start;
+  }
+
+  .library-summary {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .library-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .library-search {
+    max-width: none;
+    width: 100%;
   }
 
   .content-band,
