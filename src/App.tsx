@@ -284,6 +284,19 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   return data;
 }
 
+async function waitForSpreadsheetExtraction(spreadsheetId: string) {
+  const startedAt = Date.now();
+  const timeoutMs = 8 * 60 * 1000;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const data = await fetchJson<SpreadsheetResponse>(`/api/spreadsheets/${spreadsheetId}`);
+    if (data.spreadsheet.status === "ready" || data.spreadsheet.status === "failed") return data.spreadsheet;
+    await new Promise((resolve) => window.setTimeout(resolve, 1500));
+  }
+
+  throw new Error("Pre-extraction is still running. Open this spreadsheet from the list to continue watching it.");
+}
+
 function RootLayout() {
   return (
     <main className="page-shell">
@@ -480,6 +493,7 @@ function UploadPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [preExtract, setPreExtract] = useState(true);
   const [uploadAgentName, setUploadAgentName] = useState<string | null>(null);
+  const [uploadSpreadsheetId, setUploadSpreadsheetId] = useState<string | null>(null);
   const [uploadTraces, setUploadTraces] = useState<AgentTrace[]>([]);
   useAgent({
     agent: "HackathonAgent",
@@ -498,10 +512,40 @@ function UploadPage() {
     },
   });
 
+  useEffect(() => {
+    if (!uploadSpreadsheetId || !uploadAgentName) return;
+
+    let isMounted = true;
+    const pollTraces = async () => {
+      try {
+        const data = await fetchJson<AgentTraceResponse>(`/api/spreadsheets/${uploadSpreadsheetId}/traces`);
+        if (!isMounted) return;
+        setUploadTraces((current) => {
+          const traces = new Map(current.map((trace) => [trace.id, trace]));
+          for (const trace of data.traces) traces.set(trace.id, trace);
+          return [...traces.values()]
+            .sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime())
+            .slice(-30);
+        });
+      } catch {
+        // Websocket updates remain the primary path; polling is just a resilience net.
+      }
+    };
+
+    void pollTraces();
+    const interval = window.setInterval(() => void pollTraces(), 1200);
+    return () => {
+      isMounted = false;
+      window.clearInterval(interval);
+    };
+  }, [uploadAgentName, uploadSpreadsheetId]);
+
   function selectFile(nextFile: File | null) {
     setFile(nextFile);
     setError(null);
     setUploadTraces([]);
+    setUploadSpreadsheetId(null);
+    setUploadAgentName(null);
   }
 
   function handleDragOver(event: React.DragEvent<HTMLLabelElement>) {
@@ -536,6 +580,7 @@ function UploadPage() {
     setError(null);
     setIsUploading(true);
     setUploadAgentName(agentName);
+    setUploadSpreadsheetId(spreadsheetId);
     setUploadTraces([
       {
         created_at: new Date().toISOString(),
@@ -555,6 +600,12 @@ function UploadPage() {
         body: formData,
         method: "POST",
       });
+      if (preExtract) {
+        const completed = await waitForSpreadsheetExtraction(data.spreadsheet.id);
+        if (completed.status === "failed") {
+          throw new Error(completed.error_message ?? "Pre-extraction failed");
+        }
+      }
       await navigate({
         params: { spreadsheetId: data.spreadsheet.id },
         to: "/spreadsheets/$spreadsheetId",
