@@ -300,18 +300,41 @@ async function uploadSpreadsheet(request: Request, env: Env) {
     return json({ error: "Supported files: .xlsx, .xls, .csv, .tsv, .ods, .xml" }, { status: 400 });
   }
 
-  const id = crypto.randomUUID();
+  const requestedId = formData.get("spreadsheetId");
+  const id = typeof requestedId === "string" && /^[a-f0-9-]{36}$/i.test(requestedId) ? requestedId : crypto.randomUUID();
   const agentName = agentNameForSpreadsheet(id);
   const sandboxPath = `/workspace/spreadsheets/${id}/${safeFilename(file.name)}`;
   const sandbox = getSandbox(env.Sandbox, `sandbox-${id}`);
   const fileBase64 = arrayBufferToBase64(await file.arrayBuffer());
+  const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(agentName));
+
+  await stub.fetch("https://agent.local/upload-trace", {
+    body: JSON.stringify({
+      detail: { filename: file.name, sizeBytes: file.size },
+      spanType: "upload",
+      status: "running",
+      title: "Upload received",
+    }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
 
   await sandbox.mkdir(`/workspace/spreadsheets/${id}`, { recursive: true });
   await sandbox.writeFile(sandboxPath, fileBase64, {
     encoding: "base64",
   });
 
-  const stub = env.HackathonAgent.get(env.HackathonAgent.idFromName(agentName));
+  await stub.fetch("https://agent.local/upload-trace", {
+    body: JSON.stringify({
+      detail: { sandboxPath },
+      spanType: "upload",
+      status: "done",
+      title: "Stored file in sandbox",
+    }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
+
   const fileResponse = await stub.fetch("https://agent.local/spreadsheet-file", {
     body: JSON.stringify({
       contentType: file.type || "application/octet-stream",
@@ -419,6 +442,31 @@ export class HackathonAgent extends Think<Env> {
     const url = new URL(request.url);
     if (url.pathname.endsWith("/traces")) {
       return json({ traces: this.listTraces(url.searchParams.get("since")) });
+    }
+
+    if (url.pathname.endsWith("/upload-trace") && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as {
+        detail?: unknown;
+        spanType?: unknown;
+        status?: unknown;
+        title?: unknown;
+      };
+
+      if (
+        typeof body.spanType !== "string" ||
+        typeof body.title !== "string" ||
+        (body.status !== "running" && body.status !== "done" && body.status !== "error")
+      ) {
+        return new Response("Invalid upload trace payload.", { status: 400 });
+      }
+
+      this.recordTrace({
+        detail: body.detail,
+        spanType: body.spanType,
+        status: body.status,
+        title: body.title,
+      });
+      return json({ ok: true });
     }
 
     if (url.pathname.endsWith("/spreadsheet-file") && request.method === "POST") {

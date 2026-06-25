@@ -184,10 +184,29 @@ function UploadPage() {
   const [error, setError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [uploadAgentName, setUploadAgentName] = useState<string | null>(null);
+  const [uploadTraces, setUploadTraces] = useState<AgentTrace[]>([]);
+  useAgent({
+    agent: "HackathonAgent",
+    enabled: Boolean(uploadAgentName),
+    name: uploadAgentName ?? "upload-preview",
+    onMessage: (event) => {
+      if (typeof event.data !== "string") return;
+
+      try {
+        const message = JSON.parse(event.data) as unknown;
+        if (!isAgentTraceMessage(message)) return;
+        setUploadTraces((current) => [...current.filter((trace) => trace.id !== message.trace.id), message.trace].slice(-20));
+      } catch {
+        return;
+      }
+    },
+  });
 
   function selectFile(nextFile: File | null) {
     setFile(nextFile);
     setError(null);
+    setUploadTraces([]);
   }
 
   function handleDragOver(event: React.DragEvent<HTMLLabelElement>) {
@@ -213,10 +232,27 @@ function UploadPage() {
     event.preventDefault();
     if (!file || isUploading) return;
 
+    const spreadsheetId = crypto.randomUUID();
+    const agentName = `spreadsheet-${spreadsheetId}`;
     const formData = new FormData();
     formData.append("spreadsheet", file);
+    formData.append("spreadsheetId", spreadsheetId);
     setError(null);
     setIsUploading(true);
+    setUploadAgentName(agentName);
+    setUploadTraces([
+      {
+        created_at: new Date().toISOString(),
+        detail: JSON.stringify({ filename: file.name, sizeBytes: file.size }),
+        duration_ms: null,
+        id: "client-upload-started",
+        request_id: null,
+        span_type: "upload",
+        status: "running",
+        step_number: null,
+        title: "Preparing upload",
+      },
+    ]);
 
     try {
       const data = await fetchJson<SpreadsheetResponse>("/api/spreadsheets", {
@@ -231,6 +267,7 @@ function UploadPage() {
       setError(caught instanceof Error ? caught.message : "Upload failed");
     } finally {
       setIsUploading(false);
+      setUploadAgentName(null);
     }
   }
 
@@ -269,6 +306,35 @@ function UploadPage() {
           {isUploading ? <Loader2 className="spin" size={18} /> : <Upload size={18} />}
           <span>{isUploading ? "Uploading" : "Create agent"}</span>
         </button>
+
+        {(isUploading || uploadTraces.length > 0) && (
+          <div className="upload-steps">
+            <header>
+              <p className="eyebrow">Analysis</p>
+              <h2>Preparing spreadsheet agent</h2>
+            </header>
+            <ol className="trace-list">
+              {uploadTraces.map((trace) => {
+                const detail = formatTraceDetail(trace.detail);
+                return (
+                  <li className={`trace-item ${trace.status}`} key={trace.id}>
+                    <div>
+                      <span className="trace-dot" />
+                    </div>
+                    <article>
+                      <div className="trace-title-row">
+                        <h3>{trace.title}</h3>
+                        {trace.duration_ms ? <span>{trace.duration_ms}ms</span> : null}
+                      </div>
+                      <p>{trace.span_type}</p>
+                      {detail ? <pre>{detail}</pre> : null}
+                    </article>
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
+        )}
       </form>
     </section>
   );
