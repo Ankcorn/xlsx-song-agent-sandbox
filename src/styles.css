@@ -650,6 +650,42 @@
     @apply p-2;
   }
 
+  .agent-sources-view {
+    @apply content-start grid-rows-[auto_minmax(0,1fr)];
+  }
+
+  .agent-source-grid {
+    @apply grid content-start gap-3;
+  }
+
+  .agent-source-card {
+    @apply grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-4 rounded-xl border border-zinc-200 bg-white p-4 text-left shadow-sm transition hover:border-zinc-300 hover:bg-zinc-50;
+  }
+
+  .agent-source-icon {
+    @apply flex size-10 items-center justify-center rounded-lg border border-teal-100 bg-teal-50 text-teal-800;
+  }
+
+  .agent-source-body {
+    @apply grid min-w-0 gap-1;
+  }
+
+  .agent-source-title-row {
+    @apply flex min-w-0 flex-wrap items-start justify-between gap-2;
+  }
+
+  .agent-source-title-row h3 {
+    @apply min-w-0 flex-1 truncate text-base font-semibold text-zinc-950;
+  }
+
+  .agent-source-body p {
+    @apply text-sm leading-snug text-zinc-500;
+  }
+
+  .agent-source-body small {
+    @apply block min-w-0 truncate text-xs font-medium text-zinc-400;
+  }
+
   .viewer-header h2,
   .answer-card h2,
   .trend-card h2 {

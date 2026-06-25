@@ -168,6 +168,7 @@ type RawPreviewResponse = {
 };
 
 type AgentView = "chat" | "sqlite" | "raw" | "revisions";
+type MultiAgentView = "chat" | "sqlite" | "sources";
 
 type RenderedMessage = {
   id: string;
@@ -1951,6 +1952,7 @@ function AgentChatPage() {
   const [agentRecord, setAgentRecord] = useState<LibraryAgent | null>(null);
   const [sheets, setSheets] = useState<Spreadsheet[]>([]);
   const [traces, setTraces] = useState<AgentTrace[]>([]);
+  const [activeView, setActiveView] = useState<MultiAgentView>("chat");
   const [input, setInput] = useState("Summarize the attached sheets.");
   const [renderedMessages, setRenderedMessages] = useState<RenderedMessage[]>([]);
   const [analysisTables, setAnalysisTables] = useState<AnalysisTablesResponse | null>(null);
@@ -1985,7 +1987,7 @@ function AgentChatPage() {
       }
     },
   });
-  const { messages, sendMessage, status } = useAgentChat({ agent: liveAgent });
+  const { clearHistory, messages, sendMessage, status } = useAgentChat({ agent: liveAgent });
   const isBusy = status === "submitted" || status === "streaming";
 
   useEffect(() => {
@@ -2004,7 +2006,7 @@ function AgentChatPage() {
   }, [messages]);
 
   useEffect(() => {
-    if (!agentRecord || analysisTables) return;
+    if (activeView !== "sqlite" || !agentRecord || analysisTables) return;
     setIsViewerLoading(true);
     fetchJson<AnalysisTablesResponse>(`/api/agents/${agentId}/tables`)
       .then((data) => {
@@ -2013,16 +2015,16 @@ function AgentChatPage() {
       })
       .catch((caught: Error) => setViewerError(caught.message))
       .finally(() => setIsViewerLoading(false));
-  }, [agentId, agentRecord, analysisTables]);
+  }, [activeView, agentId, agentRecord, analysisTables]);
 
   useEffect(() => {
-    if (!selectedTable) return;
+    if (activeView !== "sqlite" || !selectedTable) return;
     setIsViewerLoading(true);
     fetchJson<AnalysisTableResponse>(`/api/agents/${agentId}/tables/${encodeURIComponent(selectedTable)}`)
       .then((data) => setTableData(data))
       .catch((caught: Error) => setViewerError(caught.message))
       .finally(() => setIsViewerLoading(false));
-  }, [agentId, selectedTable]);
+  }, [activeView, agentId, selectedTable]);
 
   function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2030,6 +2032,12 @@ function AgentChatPage() {
     if (!text || isBusy) return;
     sendMessage({ text });
     setInput("");
+  }
+
+  function clearChat() {
+    clearHistory();
+    setRenderedMessages([]);
+    setInput("Summarize the attached sheets.");
   }
 
   async function downloadExtractionTrace() {
@@ -2055,28 +2063,70 @@ function AgentChatPage() {
           <h1>{agentRecord.name}</h1>
           <p className="muted">{sheets.length} attached sheets · {agentRecord.description || "No description"}</p>
         </div>
+        <div className="chat-toolbar">
+          <Tabs
+            className="view-tabs"
+            size="sm"
+            value={activeView}
+            variant="segmented"
+            tabs={[
+              { label: <span className="tab-label"><Bot size={16} /> Chat</span>, value: "chat" },
+              { label: <span className="tab-label"><Database size={16} /> SQLite</span>, value: "sqlite" },
+              { label: <span className="tab-label"><Layers3 size={16} /> Sources</span>, value: "sources" },
+            ]}
+            onValueChange={(value) => setActiveView(value as MultiAgentView)}
+          />
+          {activeView === "chat" ? (
+            <Button
+              disabled={isBusy || renderedMessages.length === 0}
+              icon={<Trash2 size={16} />}
+              size="sm"
+              type="button"
+              variant="secondary-destructive"
+              onClick={clearChat}
+            >
+              Clear chat
+            </Button>
+          ) : null}
+        </div>
       </header>
       <div className="chat-main">
         <div className="chat-workspace">
-          <div className="messages">
-            <div className="attached-sheets">
-              {sheets.map((sheet) => <Badge key={sheet.id} variant="teal-subtle">{sheet.category}: {sheet.filename}</Badge>)}
-            </div>
-            {renderedMessages.length === 0 ? (
-              <Empty className="empty-state" icon={<Bot size={38} />} size="sm" title="Agent ready" description="Ask across the copied SQLite working database." />
-            ) : renderedMessages.map((message, index) => (
-              <ChatMessage
-                key={message.id}
-                isStreaming={isBusy && message.role === "assistant" && index === renderedMessages.length - 1}
-                message={message}
-              />
-            ))}
-            <SQLiteViewer analysisTables={analysisTables} error={viewerError} isLoading={isViewerLoading} selectedTable={selectedTable} setSelectedTable={setSelectedTable} tableData={tableData} />
-          </div>
-          <form className="composer" onSubmit={submitMessage}>
-            <Input aria-label="Message" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask this multi-sheet agent..." />
-            <Button aria-label="Send message" className="icon-button" loading={isBusy} shape="square" type="submit" variant="primary" disabled={isBusy || !input.trim()}><Send size={18} /></Button>
-          </form>
+          {activeView === "chat" ? (
+            <>
+              <div className="messages">
+                <div className="attached-sheets">
+                  {sheets.map((sheet) => <Badge key={sheet.id} variant="teal-subtle">{sheet.category}: {sheet.filename}</Badge>)}
+                </div>
+                {renderedMessages.length === 0 ? (
+                  <Empty className="empty-state" icon={<Bot size={38} />} size="sm" title="Agent ready" description="Ask across the copied SQLite working database." />
+                ) : renderedMessages.map((message, index) => (
+                  <ChatMessage
+                    key={message.id}
+                    isStreaming={isBusy && message.role === "assistant" && index === renderedMessages.length - 1}
+                    message={message}
+                  />
+                ))}
+              </div>
+              <form className="composer" onSubmit={submitMessage}>
+                <Input aria-label="Message" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask this multi-sheet agent..." />
+                <Button aria-label="Send message" className="icon-button" loading={isBusy} shape="square" type="submit" variant="primary" disabled={isBusy || !input.trim()}><Send size={18} /></Button>
+              </form>
+            </>
+          ) : null}
+
+          {activeView === "sqlite" ? (
+            <SQLiteViewer
+              analysisTables={analysisTables}
+              error={viewerError}
+              isLoading={isViewerLoading}
+              selectedTable={selectedTable}
+              setSelectedTable={setSelectedTable}
+              tableData={tableData}
+            />
+          ) : null}
+
+          {activeView === "sources" ? <AgentSourcesView sheets={sheets} /> : null}
         </div>
         <aside className="trace-panel">
           <header>
@@ -2106,6 +2156,50 @@ function AgentChatPage() {
           </div>
         </aside>
       </div>
+    </section>
+  );
+}
+
+function AgentSourcesView({ sheets }: { sheets: Spreadsheet[] }) {
+  return (
+    <section className="data-viewer agent-sources-view">
+      <header className="viewer-header">
+        <div>
+          <p className="eyebrow">Sources</p>
+          <h2>{sheets.length} attached {sheets.length === 1 ? "sheet" : "sheets"}</h2>
+        </div>
+      </header>
+
+      {sheets.length === 0 ? (
+        <Empty
+          className="viewer-empty"
+          icon={<Layers3 size={32} />}
+          size="sm"
+          title="No source sheets"
+          description="Attach Data Library sheets to build a multi-sheet agent."
+        />
+      ) : (
+        <div className="agent-source-grid">
+          {sheets.map((sheet) => (
+            <Link
+              className="agent-source-card"
+              key={sheet.id}
+              params={{ spreadsheetId: sheet.id }}
+              to="/spreadsheets/$spreadsheetId"
+            >
+              <div className="agent-source-icon"><FileSpreadsheet size={20} /></div>
+              <div className="agent-source-body">
+                <div className="agent-source-title-row">
+                  <h3>{sheet.filename}</h3>
+                  <Badge variant={sheet.status === "failed" ? "error" : "teal-subtle"}>{sheet.status ?? "ready"}</Badge>
+                </div>
+                <p>{sheet.category || "Uncategorised"} · {formatBytes(sheet.size_bytes)} · {extractionLabel(sheet)}</p>
+                <small>{sheet.agent_name}</small>
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
