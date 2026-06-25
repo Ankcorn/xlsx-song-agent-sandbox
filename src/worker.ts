@@ -568,6 +568,24 @@ function isSpreadsheetFile(file: File) {
   );
 }
 
+function extractionNotReadyResponse(spreadsheet: SpreadsheetRow) {
+  if (spreadsheet.pre_extract !== 1 || spreadsheet.status === "ready") return null;
+
+  const message =
+    spreadsheet.status === "failed"
+      ? `Pre-extraction failed for ${spreadsheet.filename}: ${spreadsheet.error_message ?? "unknown error"}`
+      : `Pre-extraction is still ${spreadsheet.status} for ${spreadsheet.filename}. Retry this request when the spreadsheet status is ready.`;
+
+  return json(
+    {
+      error: message,
+      spreadsheetId: spreadsheet.id,
+      status: spreadsheet.status,
+    },
+    { status: spreadsheet.status === "failed" ? 409 : 425 },
+  );
+}
+
 async function listSpreadsheets(env: Env) {
   const { results } = await env.DB.prepare(
     [
@@ -811,6 +829,8 @@ async function sendAgentRequest(request: Request, env: Env) {
   if (typeof body.spreadsheetId === "string" && body.spreadsheetId.trim()) {
     const spreadsheet = await getSpreadsheetRow(env, body.spreadsheetId.trim());
     if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+    const notReady = extractionNotReadyResponse(spreadsheet);
+    if (notReady) return notReady;
     agentName = spreadsheet.agent_name;
   }
 
@@ -820,6 +840,8 @@ async function sendAgentRequest(request: Request, env: Env) {
 async function sendSpreadsheetAgentRequest(request: Request, env: Env, spreadsheetId: string) {
   const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
   if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+  const notReady = extractionNotReadyResponse(spreadsheet);
+  if (notReady) return notReady;
 
   const body = (await request.json().catch(() => ({}))) as AgentRequestPayload;
   if (typeof body.message !== "string" || !body.message.trim()) {
