@@ -1,5 +1,6 @@
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
+import type { Spec } from "@json-render/core";
 import { Badge, Banner, Button, Empty, Input, Loader, Table, Tabs } from "./components/ui";
 import {
   Link,
@@ -35,6 +36,7 @@ import {
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { JsonRenderReport } from "./jsonRender";
 import "./styles.css";
 
 type Spreadsheet = {
@@ -312,6 +314,50 @@ function cellText(value: unknown) {
   if (value === null || value === undefined) return "";
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
   return JSON.stringify(value);
+}
+
+function parseJsonRenderSpec(text: string): Spec | null {
+  const trimmed = text.trim();
+  const candidates = [trimmed];
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) candidates.unshift(fenced[1].trim());
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "root" in parsed &&
+        "elements" in parsed &&
+        typeof (parsed as { root?: unknown }).root === "string" &&
+        typeof (parsed as { elements?: unknown }).elements === "object"
+      ) {
+        return parsed as Spec;
+      }
+    } catch {
+      // Continue to the next candidate.
+    }
+  }
+
+  return null;
+}
+
+function ChatMessage({ message }: { message: RenderedMessage }) {
+  const spec = message.role === "assistant" ? parseJsonRenderSpec(message.text) : null;
+
+  return (
+    <article className={`message ${message.role}`}>
+      <span>{message.role}</span>
+      {spec ? (
+        <div className="json-render-message">
+          <JsonRenderReport spec={spec} />
+        </div>
+      ) : (
+        <p>{message.text}</p>
+      )}
+    </article>
+  );
 }
 
 function formatSeconds(seconds: number | null | undefined) {
@@ -1147,10 +1193,7 @@ function ChatSurface({
                 />
               ) : (
                 renderedMessages.map((message) => (
-                  <article className={`message ${message.role}`} key={message.id}>
-                    <span>{message.role}</span>
-                    <p>{message.text}</p>
-                  </article>
+                  <ChatMessage key={message.id} message={message} />
                 ))
               )}
             </div>
@@ -1676,9 +1719,7 @@ function AgentChatPage() {
             </div>
             {renderedMessages.length === 0 ? (
               <Empty className="empty-state" icon={<Bot size={38} />} size="sm" title="Agent ready" description="Ask across the copied SQLite working database." />
-            ) : renderedMessages.map((message) => (
-              <article className={`message ${message.role}`} key={message.id}><span>{message.role}</span><p>{message.text}</p></article>
-            ))}
+            ) : renderedMessages.map((message) => <ChatMessage key={message.id} message={message} />)}
             <SQLiteViewer analysisTables={analysisTables} error={viewerError} isLoading={isViewerLoading} selectedTable={selectedTable} setSelectedTable={setSelectedTable} tableData={tableData} />
           </div>
           <form className="composer" onSubmit={submitMessage}>

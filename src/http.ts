@@ -678,6 +678,18 @@ function traceDetail(summary: string, snippet?: unknown) {
   };
 }
 
+function jsonRenderResponseInstructions() {
+  return [
+    "For user-facing answers, return ONLY a valid json-render React flat spec JSON object. Do not return markdown, prose outside JSON, or fenced code blocks.",
+    "The spec shape must be: {\"root\":\"root\",\"elements\":{\"root\":{\"type\":\"Stack\",\"props\":{\"direction\":\"vertical\",\"gap\":\"lg\"},\"children\":[...]}, ...}}.",
+    "Available components: Stack, Grid, Card, Heading, Text, Badge, Alert, Separator, Table, StatGrid, BarChart, KeyValueList, DataTable.",
+    "Use Heading and Text for prose sections. Use StatGrid for KPIs, counts, totals, percentages, scores, and deltas. Use DataTable or Table for compact tabular facts. Use BarChart for comparisons across categories, periods, ranked values, or distributions. Use KeyValueList for metadata, assumptions, source notes, and citations. Use Alert for warnings, caveats, or important findings. Use Card/Grid/Stack to compose the answer.",
+    "Keep tables small and readable. Prefer 3-8 rows unless the user asks for exhaustive output. Include source_ref/source_row/source table notes in KeyValueList or captions when available.",
+    "All display text must be in props. Do not put markdown headings, bullets, or tables inside Text. Use multiple json-render elements instead.",
+    "Example custom components: {\"type\":\"StatGrid\",\"props\":{\"items\":[{\"label\":\"Rows\",\"value\":\"1,019\",\"delta\":null,\"description\":\"Total entities found\"}]},\"children\":[]}; {\"type\":\"BarChart\",\"props\":{\"title\":\"Entities by sector\",\"valueLabel\":\"entities\",\"data\":[{\"label\":\"Central Government\",\"value\":657}]},\"children\":[]}; {\"type\":\"DataTable\",\"props\":{\"columns\":[\"Sector\",\"Entity Count\"],\"rows\":[{\"Sector\":\"Central Government\",\"Entity Count\":\"657\"}],\"caption\":\"Derived from extracted table\"},\"children\":[]}.",
+  ].join("\n");
+}
+
 function profileSummary(profile: unknown) {
   if (typeof profile !== "object" || profile === null) return profile;
   const record = profile as {
@@ -1851,6 +1863,7 @@ export class SheetsThink extends Think<Env> {
       "Use robust CSV/TSV parsing: sniff delimiters, prefer pandas.read_csv(..., engine='python', on_bad_lines='skip', encoding='utf-8-sig') when using pandas, and fall back to csv.reader for ragged files. Use pandas.read_excel for XLSX/XLS, pandas.read_excel(..., engine='odf') for ODS, and pandas.read_xml or lxml/ElementTree for XML.",
       "When citing values, include the source_ref/source_row from the generated database where possible.",
       "Keep answers concise, concrete, and useful.",
+      jsonRenderResponseInstructions(),
     ].join("\n");
   }
 
@@ -3003,6 +3016,7 @@ export class AgentThink extends Think<Env> {
       "You may create or restructure derived tables only with the dedicated edit tools. Do not claim the original library sheets were edited.",
       "When citing values, include source spreadsheet/table/source_ref/source_row where possible.",
       "Keep answers concise, concrete, and useful.",
+      jsonRenderResponseInstructions(),
     ].join("\n");
   }
 
