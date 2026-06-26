@@ -1444,26 +1444,19 @@ async function searchLocalDataset(env: Env, message: string) {
 
 async function searchDataGov(message: string) {
   const packages: DataGovPackage[] = [];
+  const errors: Array<{ error: string; query: string }> = [];
   const seenPackages = new Set<string>();
   for (const query of dataGovSearchQueries(message)) {
-    const url = new URL("https://data.gov.uk/api/action/package_search");
-    url.searchParams.set("q", query);
-    url.searchParams.set("rows", "20");
-
-    const response = await fetch(url, {
-      headers: { accept: "application/json", "user-agent": "xlsx-song-agent-sandbox/1.0" },
-    });
-    if (!response.ok) throw new Error(`data.gov.uk search failed with ${response.status}`);
-
-    const data = (await response.json()) as {
-      result?: { results?: DataGovPackage[] };
-      success?: boolean;
-    };
-    for (const dataset of data.result?.results ?? []) {
-      const key = dataset.id ?? dataset.title ?? JSON.stringify(dataset).slice(0, 120);
-      if (seenPackages.has(key)) continue;
-      seenPackages.add(key);
-      packages.push(dataset);
+    try {
+      const data = await fetchDataGovSearch(query);
+      for (const dataset of data.result?.results ?? []) {
+        const key = dataset.id ?? dataset.title ?? JSON.stringify(dataset).slice(0, 120);
+        if (seenPackages.has(key)) continue;
+        seenPackages.add(key);
+        packages.push(dataset);
+      }
+    } catch (error) {
+      errors.push({ error: error instanceof Error ? error.message : String(error), query });
     }
   }
   const resources = packages.flatMap((dataset) =>
@@ -1488,7 +1481,40 @@ async function searchDataGov(message: string) {
       })),
   );
   resources.sort((a, b) => b.score - a.score);
-  return { packages, resources };
+  return { errors, packages, resources };
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchDataGovSearch(query: string) {
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const url = new URL("https://data.gov.uk/api/action/package_search");
+      url.searchParams.set("q", query);
+      url.searchParams.set("rows", "20");
+
+      const response = await fetch(url, {
+        headers: { accept: "application/json", "user-agent": "xlsx-song-agent-sandbox/1.0" },
+      });
+      if (!response.ok) {
+        throw new Error(`data.gov.uk search failed with ${response.status}`);
+      }
+
+      return (await response.json()) as {
+        result?: { results?: DataGovPackage[] };
+        success?: boolean;
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt < 3) await delay(400 * attempt);
+    }
+  }
+
+  throw lastError ?? new Error("data.gov.uk search failed");
 }
 
 function dataGovSearchQueries(message: string) {
@@ -1809,9 +1835,14 @@ async function sendDatasetAgentRequest(request: Request, env: Env) {
     steps.push({ status: "running", title: "Searching data.gov.uk" });
     const external = await searchDataGov(message);
     steps[steps.length - 1] = {
-      detail: { datasets: external.packages.length, resources: external.resources.length, topScore: external.resources[0]?.score ?? null },
-      status: "done",
-      title: "Searched data.gov.uk",
+      detail: {
+        datasets: external.packages.length,
+        errors: external.errors,
+        resources: external.resources.length,
+        topScore: external.resources[0]?.score ?? null,
+      },
+      status: external.errors.length && external.resources.length === 0 ? "error" : "done",
+      title: external.errors.length && external.resources.length === 0 ? "data.gov.uk search unavailable" : "Searched data.gov.uk",
     };
     steps.push({ status: "running", title: "Checking local Data Library" });
     const local = await searchLocalDataset(env, message);

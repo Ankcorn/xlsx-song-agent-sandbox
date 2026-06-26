@@ -4402,7 +4402,7 @@ function AskDataPage() {
         <div>
           <p className="eyebrow">Dataset agent</p>
           <h1>Ask across local and public data</h1>
-          <p className="muted">The agent checks local uploaded datasets first, then searches data.gov.uk if needed.</p>
+          <p className="muted">The agent searches data.gov.uk first, then checks local uploaded datasets if needed.</p>
         </div>
         <div className="chat-toolbar">
           <Button disabled={!latestRun} icon={<Search size={16} />} size="sm" type="button" variant="secondary" onClick={() => setShowEvidence((value) => !value)}>
