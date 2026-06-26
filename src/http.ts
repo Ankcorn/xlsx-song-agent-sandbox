@@ -107,6 +107,7 @@ export type AgentChatMessage = {
 };
 
 export type AgentRequestPayload = {
+  accessMode?: unknown;
   agentName?: unknown;
   message?: unknown;
   model?: unknown;
@@ -1190,7 +1191,7 @@ async function sendAgentRequest(request: Request, env: Env) {
     agentName = spreadsheet.agent_name;
   }
 
-  return sendAgentMessage(env, agentName, body.message, selectedModel);
+  return sendAgentMessage(env, agentName, body.message, selectedModel, body.accessMode);
 }
 
 async function sendSpreadsheetAgentRequest(request: Request, env: Env, spreadsheetId: string) {
@@ -1210,7 +1211,7 @@ async function sendSpreadsheetAgentRequest(request: Request, env: Env, spreadshe
     return json({ error: error instanceof Error ? error.message : "Invalid model." }, { status: 400 });
   }
 
-  return sendAgentMessage(env, spreadsheet.agent_name, body.message, selectedModel);
+  return sendAgentMessage(env, spreadsheet.agent_name, body.message, selectedModel, body.accessMode);
 }
 
 async function sendBenchmarkQuery(request: Request, env: Env) {
@@ -1863,7 +1864,7 @@ async function spreadsheetSearchCandidates(env: Env): Promise<SpreadsheetSearchC
   );
 }
 
-async function fetchAgentMessageData(env: Env, agentName: string, message: string, selectedModel?: ModelEntry) {
+async function fetchAgentMessageData(env: Env, agentName: string, message: string, selectedModel?: ModelEntry, accessMode?: unknown) {
   let stub: DurableObjectStub;
   if (agentName.startsWith("agent-")) {
     stub = env.AgentThink.get(env.AgentThink.idFromName(agentName));
@@ -1871,7 +1872,7 @@ async function fetchAgentMessageData(env: Env, agentName: string, message: strin
     stub = env.SheetsThink.get(env.SheetsThink.idFromName(agentName));
   }
   const response = await stub.fetch("https://agent.local/api-request", {
-    body: JSON.stringify({ message, model: selectedModel }),
+    body: JSON.stringify({ accessMode, message, model: selectedModel }),
     headers: { "content-type": "application/json" },
     method: "POST",
   });
@@ -1883,8 +1884,8 @@ async function fetchAgentMessageData(env: Env, agentName: string, message: strin
   return { data, status: response.status };
 }
 
-async function sendAgentMessage(env: Env, agentName: string, message: string, selectedModel?: ModelEntry) {
-  const { data, status } = await fetchAgentMessageData(env, agentName, message, selectedModel);
+async function sendAgentMessage(env: Env, agentName: string, message: string, selectedModel?: ModelEntry, accessMode?: unknown) {
+  const { data, status } = await fetchAgentMessageData(env, agentName, message, selectedModel, accessMode);
   return json(data, { status });
 }
 

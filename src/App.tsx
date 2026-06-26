@@ -296,8 +296,10 @@ type BenchmarkSelectionCandidate = {
 };
 
 type BenchmarkSelectionEvidence = {
+  accessMode?: string | null;
   candidates?: BenchmarkSelectionCandidate[];
   durationMs?: number;
+  estimatedCostUsd?: number | null;
   model?: {
     fallbackModels?: Array<{ model: string; provider: string }>;
     gatewayId?: string;
@@ -1023,6 +1025,18 @@ function formatNumber(value: number | null | undefined) {
 function aiModelLabel(model: AiModelOption | null | undefined) {
   if (!model) return "Loading models";
   return `${model.provider} · ${model.model}`;
+}
+
+function benchmarkAccessMode(run: BenchmarkRun) {
+  const accessMode = run.evidence?.accessMode;
+  return typeof accessMode === "string" && accessMode ? accessMode : "auto";
+}
+
+function formatCurrency(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "n/a";
+  if (value === 0) return "$0.00";
+  if (value < 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(2)}`;
 }
 
 function formatDateTime(value: string) {
@@ -4352,6 +4366,7 @@ function BenchmarkResults({
                 <td>
                   <strong>{run.modelProvider ?? "n/a"}</strong>
                   <span>{run.modelName ?? "n/a"}</span>
+                  <span>{benchmarkAccessMode(run)}</span>
                 </td>
                 <td>
                   <strong>{formatSeconds(run.answerSeconds)}</strong>
@@ -4361,6 +4376,7 @@ function BenchmarkResults({
                 <td>
                   <strong>{formatNumber(run.totalTokens)}</strong>
                   <span>in {formatNumber(run.inputTokens)} · out {formatNumber(run.outputTokens)}</span>
+                  <span>cost {formatCurrency(run.evidence?.estimatedCostUsd)}</span>
                 </td>
                 <td>
                   <QualityButtons quality={run.quality} runId={run.id} setQuality={setQuality} />

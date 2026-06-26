@@ -74,6 +74,13 @@ type CodemodeExtractorProfile = {
   title: string;
 };
 
+type SpreadsheetAccessMode = "auto" | "raw" | "sqlite";
+
+function requestedAccessMode(value: unknown): SpreadsheetAccessMode {
+  if (value === undefined || value === null || value === "") return "auto";
+  if (value === "auto" || value === "raw" || value === "sqlite") return value;
+  throw new Error("accessMode must be one of auto, sqlite, or raw.");
+}
 
 const CODEMODE_INSPECTION_SCRIPT = String.raw`
 import csv
@@ -1272,10 +1279,16 @@ export class SheetsThink extends Think<Env> {
     return gateway(gatewayEntries.map((entry) => providerModel(entry.provider, entry.model)));
   }
 
-  getSystemPrompt() {
+  getSystemPrompt(accessMode: SpreadsheetAccessMode = "auto") {
     const spreadsheetId = spreadsheetIdFromAgentName(this.name);
     const fileMode = spreadsheetId ? this.getSpreadsheetFileMode(spreadsheetId) : null;
-    const preExtracted = fileMode?.preExtract ?? true;
+    const preExtracted = accessMode === "raw" ? false : accessMode === "sqlite" ? true : (fileMode?.preExtract ?? true);
+    const modeInstruction =
+      accessMode === "sqlite"
+        ? "Benchmark access mode override: answer this request through the extracted SQLite database. Use describe_spreadsheet_database and query_spreadsheet_database first; do not inspect the raw file unless SQL cannot answer."
+        : accessMode === "raw"
+          ? "Benchmark access mode override: answer this request by inspecting the raw spreadsheet file with execute_python. Do not use describe_spreadsheet_database or query_spreadsheet_database for this request."
+          : "";
 
     return [
       "You are a practical hackathon coding assistant.",
@@ -1290,9 +1303,12 @@ export class SheetsThink extends Think<Env> {
       "For questions about upload history, edits, versions, or revisions, call list_spreadsheet_revisions.",
       "Use robust CSV/TSV parsing: sniff delimiters, prefer pandas.read_csv(..., engine='python', on_bad_lines='skip', encoding='utf-8-sig') when using pandas, and fall back to csv.reader for ragged files. Use pandas/openpyxl for XLSX/XLS when useful. For ODS, avoid pandas/odf in constrained sandboxes and prefer lightweight zip/content.xml parsing. Use pandas.read_xml or lxml/ElementTree for XML.",
       "When citing values, include the source_ref/source_row from the generated database where possible.",
+      modeInstruction,
       "Keep answers concise, concrete, and useful.",
       jsonRenderResponseInstructions(),
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
   getTools() {
@@ -1386,8 +1402,10 @@ export class SheetsThink extends Think<Env> {
         return json({ error: "Send JSON with a non-empty 'message' string." }, { status: 400 });
       }
       let selectedModel: ModelEntry | undefined;
+      let accessMode: SpreadsheetAccessMode;
       try {
         selectedModel = requestedModelEntry(this.env, body);
+        accessMode = requestedAccessMode(body.accessMode);
       } catch (error) {
         return json({ error: error instanceof Error ? error.message : "Invalid model." }, { status: 400 });
       }
@@ -1398,7 +1416,7 @@ export class SheetsThink extends Think<Env> {
       const previousMessages = this.listChatMessages(8);
       this.recordChatMessage("user", body.message, requestId);
       this.recordTrace({
-        detail: { message: body.message, model },
+        detail: { accessMode, message: body.message, model },
         requestId,
         spanType: "api",
         status: "running",
@@ -1410,7 +1428,7 @@ export class SheetsThink extends Think<Env> {
           model: this.getModel(selectedModel),
           prompt: this.promptWithChatHistory(previousMessages, body.message),
           stopWhen: stepCountIs(6),
-          system: this.getSystemPrompt(),
+          system: this.getSystemPrompt(accessMode),
           temperature: 0.2,
           tools: this.getTools(),
         });
@@ -1435,6 +1453,7 @@ export class SheetsThink extends Think<Env> {
           model,
           requestId,
           response: responseText,
+          accessMode,
           usage: result.usage,
         });
       } catch (error) {
