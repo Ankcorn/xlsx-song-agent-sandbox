@@ -1317,6 +1317,82 @@ function lexicalScore(query: string, text: string) {
   return matches / terms.size;
 }
 
+function normalizedSearchText(value: string) {
+  return ` ${value.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `;
+}
+
+function hasAnyPhrase(text: string, phrases: string[]) {
+  return phrases.some((phrase) => text.includes(` ${phrase} `));
+}
+
+function expectsNationalCoverage(query: string) {
+  const text = normalizedSearchText(query);
+  return hasAnyPhrase(text, [
+    "uk",
+    "u k",
+    "united kingdom",
+    "great britain",
+    "britain",
+    "british",
+    "national",
+    "nationwide",
+    "whole country",
+    "across the country",
+  ]);
+}
+
+function geographicScopeAdjustment(query: string, text: string) {
+  if (!expectsNationalCoverage(query)) return 0;
+
+  const normalized = normalizedSearchText(text);
+  let adjustment = 0;
+
+  if (
+    hasAnyPhrase(normalized, [
+      "uk",
+      "u k",
+      "united kingdom",
+      "great britain",
+      "britain",
+      "british",
+      "national",
+      "nationwide",
+      "england",
+      "scotland",
+      "wales",
+      "northern ireland",
+    ])
+  ) {
+    adjustment += 0.35;
+  }
+
+  if (
+    hasAnyPhrase(normalized, [
+      "local authority",
+      "local authorities",
+      "city council",
+      "county council",
+      "borough council",
+      "district council",
+      "metropolitan borough",
+      "leeds",
+      "manchester",
+      "birmingham",
+      "bristol",
+      "liverpool",
+      "sheffield",
+      "newcastle",
+      "nottingham",
+      "camden",
+      "westminster",
+    ])
+  ) {
+    adjustment -= 0.55;
+  }
+
+  return adjustment;
+}
+
 function candidateSearchText(candidate: SpreadsheetSearchCandidate) {
   return [
     candidate.filename,
@@ -1354,15 +1430,22 @@ function filenameFromResource(resource: DataGovResource, dataset: DataGovPackage
 async function searchLocalDataset(env: Env, message: string) {
   const candidates = await spreadsheetSearchCandidates(env);
   const ranked = candidates
-    .map((candidate) => ({ candidate, score: lexicalScore(message, candidateSearchText(candidate)) }))
+    .map((candidate) => {
+      const text = candidateSearchText(candidate);
+      const lexical = lexicalScore(message, text);
+      return {
+        candidate,
+        score: Math.max(0, lexical + geographicScopeAdjustment(message, text)),
+      };
+    })
     .sort((a, b) => b.score - a.score);
-  return { candidates, match: ranked[0] ?? null };
+  return { candidates, match: ranked[0] ?? null, ranked };
 }
 
 async function searchDataGov(message: string) {
   const url = new URL("https://data.gov.uk/api/action/package_search");
   url.searchParams.set("q", message);
-  url.searchParams.set("rows", "8");
+  url.searchParams.set("rows", "20");
 
   const response = await fetch(url, {
     headers: { accept: "application/json", "user-agent": "xlsx-song-agent-sandbox/1.0" },
@@ -1380,11 +1463,180 @@ async function searchDataGov(message: string) {
       .map((resource) => ({
         dataset,
         resource,
-        score: lexicalScore(message, `${dataset.title ?? ""} ${dataset.notes ?? ""} ${resource.name ?? ""} ${resource.description ?? ""} ${resource.format ?? ""}`),
+        score: (() => {
+          const text = [
+            dataset.title,
+            dataset.notes,
+            dataset.organization?.title,
+            resource.name,
+            resource.description,
+            resource.format,
+          ]
+            .filter(Boolean)
+            .join(" ");
+          return Math.max(0, lexicalScore(message, text) + geographicScopeAdjustment(message, text));
+        })(),
       })),
   );
   resources.sort((a, b) => b.score - a.score);
   return { packages, resources };
+}
+
+function dataGovCandidateId(index: number) {
+  return `data-gov-${index}`;
+}
+
+async function selectAskDataCandidate(
+  env: Env,
+  message: string,
+  local: Awaited<ReturnType<typeof searchLocalDataset>>,
+  external: Awaited<ReturnType<typeof searchDataGov>>,
+  selectedModel?: ModelEntry,
+) {
+  const startedAt = Date.now();
+  const localCandidates = local.ranked.slice(0, 6).map((item) => ({
+    description: item.candidate.description,
+    filename: item.candidate.filename,
+    geographyHint: candidateSearchText(item.candidate).slice(0, 600),
+    heuristicScore: item.score,
+    id: item.candidate.id,
+    source: "local",
+    status: item.candidate.status,
+    tables: item.candidate.tables.slice(0, 4).map((table) => ({
+      columns: table.columns.slice(0, 12),
+      name: table.name,
+      rowCount: table.rowCount,
+      sourceName: table.sourceName,
+    })),
+  }));
+  const dataGovCandidates = external.resources.slice(0, 10).map((item, index) => ({
+    datasetTitle: item.dataset.title,
+    description: item.dataset.notes ?? item.resource.description ?? null,
+    filename: item.resource.name ?? item.dataset.title ?? item.resource.url ?? "data.gov.uk resource",
+    format: item.resource.format,
+    heuristicScore: item.score,
+    id: dataGovCandidateId(index),
+    organization: item.dataset.organization?.title,
+    resourceName: item.resource.name,
+    source: "data.gov.uk",
+  }));
+  const candidates = [...localCandidates, ...dataGovCandidates];
+
+  if (candidates.length === 0) {
+    return {
+      candidates,
+      durationMs: Date.now() - startedAt,
+      reason: "No local or data.gov.uk candidates were available.",
+      score: 0,
+      source: "none" as const,
+      usage: null as unknown,
+    };
+  }
+
+  try {
+    const result = await generateText({
+      model: modelForEnv(env, selectedModel),
+      prompt: [
+        "Choose the dataset that is most suitable for answering the user's question.",
+        "Return only JSON with keys: source, id, score, reason.",
+        "source must be one of: local, data.gov.uk, none.",
+        "score must be a number from 0 to 1.",
+        "Reject candidates that match topic words but have the wrong geography, time period, metric, or granularity.",
+        "For UK-wide or national questions, do not choose local council, city, school, borough, or single-place datasets unless the user explicitly asks for that place.",
+        "Prefer datasets that can directly answer the question over datasets that are only loosely related.",
+        "When a data.gov.uk candidate and a local candidate are equally suitable, prefer data.gov.uk because this workflow is for discovering open government data.",
+        "",
+        `Question: ${message}`,
+        "",
+        "Candidates:",
+        JSON.stringify(candidates, null, 2),
+      ].join("\n"),
+      temperature: 0,
+    });
+    const parsed = parseJsonText(result.text) as {
+      id?: unknown;
+      reason?: unknown;
+      score?: unknown;
+      source?: unknown;
+    };
+    const source = parsed.source === "local" || parsed.source === "data.gov.uk" || parsed.source === "none" ? parsed.source : "none";
+    const id = typeof parsed.id === "string" ? parsed.id : "";
+    const score = typeof parsed.score === "number" ? Math.max(0, Math.min(1, parsed.score)) : 0;
+    const reason = typeof parsed.reason === "string" ? parsed.reason : "Selected by dataset suitability judge.";
+
+    if (source === "local") {
+      const selected = local.ranked.find((item) => item.candidate.id === id) ?? local.ranked[0];
+      if (selected && score >= 0.45) {
+        return {
+          candidates,
+          durationMs: Date.now() - startedAt,
+          local: selected,
+          reason,
+          score,
+          source,
+          usage: result.usage,
+        };
+      }
+    }
+
+    if (source === "data.gov.uk") {
+      const index = Number(id.replace(/^data-gov-/, ""));
+      const selected = Number.isInteger(index) ? external.resources[index] : external.resources[0];
+      if (selected && score >= 0.45) {
+        return {
+          candidates,
+          durationMs: Date.now() - startedAt,
+          external: selected,
+          reason,
+          score,
+          source,
+          usage: result.usage,
+        };
+      }
+    }
+
+    return {
+      candidates,
+      durationMs: Date.now() - startedAt,
+      reason,
+      score,
+      source: "none" as const,
+      usage: result.usage,
+    };
+  } catch (error) {
+    const fallbackLocal = local.match && local.match.score >= 0.3 ? local.match : null;
+    const fallbackExternal = external.resources[0] ?? null;
+    if (fallbackLocal && (!fallbackExternal || fallbackLocal.score >= fallbackExternal.score)) {
+      return {
+        candidates,
+        durationMs: Date.now() - startedAt,
+        local: fallbackLocal,
+        reason: `Dataset suitability judge failed, so the best heuristic local match was used: ${error instanceof Error ? error.message : String(error)}`,
+        score: fallbackLocal.score,
+        source: "local" as const,
+        usage: null as unknown,
+      };
+    }
+    if (fallbackExternal) {
+      return {
+        candidates,
+        durationMs: Date.now() - startedAt,
+        external: fallbackExternal,
+        reason: `Dataset suitability judge failed, so the best heuristic data.gov.uk match was used: ${error instanceof Error ? error.message : String(error)}`,
+        score: fallbackExternal.score,
+        source: "data.gov.uk" as const,
+        usage: null as unknown,
+      };
+    }
+    return {
+      candidates,
+      durationMs: Date.now() - startedAt,
+      reason: `Dataset suitability judge failed and no fallback candidate was available: ${error instanceof Error ? error.message : String(error)}`,
+      score: 0,
+      source: "none" as const,
+      usage: null as unknown,
+    };
+  }
 }
 
 async function importDataGovResource(env: Env, message: string, dataset: DataGovPackage, resource: DataGovResource) {
@@ -1495,17 +1747,46 @@ async function sendDatasetAgentRequest(request: Request, env: Env) {
   const startedAt = Date.now();
 
   try {
-    steps.push({ status: "running", title: "Searching local Data Library" });
+    steps.push({ status: "running", title: "Searching data.gov.uk" });
+    const external = await searchDataGov(message);
+    steps[steps.length - 1] = {
+      detail: { datasets: external.packages.length, resources: external.resources.length, topScore: external.resources[0]?.score ?? null },
+      status: "done",
+      title: "Searched data.gov.uk",
+    };
+    steps.push({ status: "running", title: "Checking local Data Library" });
     const local = await searchLocalDataset(env, message);
-    const localThreshold = local.candidates.length === 1 ? 0.18 : 0.25;
+    steps[steps.length - 1] = {
+      detail: { candidates: local.candidates.length, bestScore: local.match?.score ?? null },
+      status: "done",
+      title: "Checked local Data Library",
+    };
 
-    if (local.match && local.match.score >= localThreshold) {
-      const spreadsheet = await getSpreadsheetRow(env, local.match.candidate.id);
+    steps.push({ status: "running", title: "Judging dataset suitability" });
+    const selection = await selectAskDataCandidate(env, message, local, external, selectedModel);
+    if (selection.source === "none") {
+      steps[steps.length - 1] = { detail: { reason: selection.reason, score: selection.score }, status: "error", title: "No suitable dataset found" };
+      return json({
+        agentName: "dataset-agent",
+        finishReason: "no_dataset",
+        model: modelConfig(env, selectedModel),
+        requestId: crypto.randomUUID(),
+        response: "Sorry, I could not find a local or data.gov.uk dataset that looked suitable for that question.",
+        steps,
+        totalDurationMs: Date.now() - startedAt,
+        usage: null,
+      });
+    }
+
+    if (selection.source === "local") {
+      const localSelection = selection.local;
+      if (!localSelection) throw new Error("Dataset suitability judge selected a local dataset but did not return a local candidate.");
+      const spreadsheet = await getSpreadsheetRow(env, localSelection.candidate.id);
       if (!spreadsheet) throw new Error("Local dataset match could not be loaded.");
       steps[steps.length - 1] = {
-        detail: { filename: spreadsheet.filename, score: local.match.score },
+        detail: { filename: spreadsheet.filename, reason: selection.reason, score: selection.score },
         status: "done",
-        title: "Found relevant local dataset",
+        title: "Selected local dataset",
       };
       const answer = await fetchAgentMessageData(env, spreadsheet.agent_name, message, selectedModel);
       const data = answer.data && typeof answer.data === "object" ? answer.data : { response: answer.data };
@@ -1513,15 +1794,15 @@ async function sendDatasetAgentRequest(request: Request, env: Env) {
       return json(
         {
           ...data,
-          response: `I found an existing local dataset that looks relevant: ${spreadsheet.filename}. I used that rather than searching data.gov.uk.\n\n${responseText}`,
-          selectedSpreadsheet: { filename: spreadsheet.filename, id: spreadsheet.id, reason: "Matched an existing local dataset.", score: local.match.score },
+          response: `I found an existing local dataset that looks suitable: ${spreadsheet.filename}. ${selection.reason}\n\n${responseText}`,
+          selectedSpreadsheet: { filename: spreadsheet.filename, id: spreadsheet.id, reason: selection.reason, score: selection.score },
           selection: {
-            candidates: local.candidates,
-            durationMs: 0,
+            candidates: selection.candidates,
+            durationMs: selection.durationMs,
             model: modelConfig(env, selectedModel),
-            reason: "Matched an existing local dataset before searching data.gov.uk.",
-            score: local.match.score,
-            usage: null,
+            reason: selection.reason,
+            score: selection.score,
+            usage: selection.usage,
           },
           steps,
           totalDurationMs: Date.now() - startedAt,
@@ -1530,32 +1811,12 @@ async function sendDatasetAgentRequest(request: Request, env: Env) {
       );
     }
 
+    const best = selection.external;
+    if (!best) throw new Error("Dataset suitability judge selected data.gov.uk but did not return a resource.");
     steps[steps.length - 1] = {
-      detail: { candidates: local.candidates.length, bestScore: local.match?.score ?? null },
+      detail: { dataset: best.dataset.title, reason: selection.reason, resource: best.resource.name, score: selection.score },
       status: "done",
-      title: "No strong local match",
-    };
-    steps.push({ status: "running", title: "Searching data.gov.uk" });
-    const external = await searchDataGov(message);
-    const best = external.resources[0];
-    if (!best) {
-      steps[steps.length - 1] = { detail: { datasets: external.packages.length }, status: "error", title: "No usable data.gov.uk file found" };
-      return json({
-        agentName: "dataset-agent",
-        finishReason: "no_dataset",
-        model: modelConfig(env, selectedModel),
-        requestId: crypto.randomUUID(),
-        response: "Sorry, I could not find a relevant local dataset or a usable spreadsheet file on data.gov.uk for that question.",
-        steps,
-        totalDurationMs: Date.now() - startedAt,
-        usage: null,
-      });
-    }
-
-    steps[steps.length - 1] = {
-      detail: { dataset: best.dataset.title, resource: best.resource.name, score: best.score },
-      status: "done",
-      title: "Found data.gov.uk resource",
+      title: "Selected data.gov.uk resource",
     };
     steps.push({ status: "running", title: "Importing data.gov.uk file" });
     const imported = await importDataGovResource(env, message, best.dataset, best.resource);
@@ -1576,8 +1837,16 @@ async function sendDatasetAgentRequest(request: Request, env: Env) {
         requestId: crypto.randomUUID(),
         response: isFailed
           ? `I found and imported ${best.dataset.title ?? best.resource.name ?? "a data.gov.uk dataset"}, but processing failed before I could answer.`
-          : `I found and imported ${best.dataset.title ?? best.resource.name ?? "a data.gov.uk dataset"}. I am processing it in the background and will answer when it is ready.`,
-        selectedSpreadsheet: { filename: imported.filename, id: imported.id, reason: "Imported from data.gov.uk.", score: best.score },
+          : `I found and imported ${best.dataset.title ?? best.resource.name ?? "a data.gov.uk dataset"}. ${selection.reason} I am processing it in the background and will answer when it is ready.`,
+        selectedSpreadsheet: { filename: imported.filename, id: imported.id, reason: selection.reason, score: selection.score },
+        selection: {
+          candidates: selection.candidates,
+          durationMs: selection.durationMs,
+          model: modelConfig(env, selectedModel),
+          reason: selection.reason,
+          score: selection.score,
+          usage: selection.usage,
+        },
         steps,
         totalDurationMs: Date.now() - startedAt,
         usage: null,
@@ -1591,25 +1860,16 @@ async function sendDatasetAgentRequest(request: Request, env: Env) {
     return json(
       {
         ...data,
-        response: `I could not find a strong local match, so I searched data.gov.uk and imported ${imported.filename}. I created a dataset agent for it and used that to answer.\n\n${responseText}`,
+        response: `I selected ${imported.filename} from data.gov.uk. ${selection.reason}\n\n${responseText}`,
         importedSpreadsheet: { filename: imported.filename, id: imported.id },
-        selectedSpreadsheet: { filename: imported.filename, id: imported.id, reason: "Imported from data.gov.uk after no strong local match.", score: best.score },
+        selectedSpreadsheet: { filename: imported.filename, id: imported.id, reason: selection.reason, score: selection.score },
         selection: {
-          candidates: external.resources.slice(0, 5).map((item) => ({
-            columns: [],
-            description: item.dataset.notes ?? item.resource.description ?? null,
-            filename: item.resource.name ?? item.dataset.title ?? item.resource.url ?? "data.gov.uk resource",
-            id: item.resource.id ?? item.dataset.id ?? item.resource.url ?? "data-gov-resource",
-            rowCount: 0,
-            status: item.resource.format ?? "resource",
-            tables: [],
-            updatedAt: item.resource.last_modified ?? "",
-          })),
-          durationMs: 0,
+          candidates: selection.candidates,
+          durationMs: selection.durationMs,
           model: modelConfig(env, selectedModel),
-          reason: "Imported the best matching data.gov.uk resource after local search did not find a strong match.",
-          score: best.score,
-          usage: null,
+          reason: selection.reason,
+          score: selection.score,
+          usage: selection.usage,
         },
         steps,
         totalDurationMs: Date.now() - startedAt,
