@@ -11,10 +11,12 @@ import {
   json,
   jsonRenderResponseInstructions,
   listSpreadsheetRevisionRows,
+  modelEntriesForRequest,
   modelConfig,
   parseJsonText,
   parseStringArray,
   providerModel,
+  requestedModelEntry,
   runPython,
   safeFilename,
   safeTraceDetail,
@@ -24,6 +26,7 @@ import {
   type AgentRequestPayload,
   type AgentTraceEvent,
   type Env,
+  type ModelEntry,
   type TraceInput,
 } from "./http";
 
@@ -798,8 +801,8 @@ export class SheetsThink extends Think<Env> {
   private traceSchemaReady = false;
   private turnStartTimes = new Map<string, number>();
 
-  getModel() {
-    const entries = configuredModelEntries(this.env);
+  getModel(selectedModel?: ModelEntry) {
+    const entries = modelEntriesForRequest(this.env, selectedModel);
     if (entries[0]?.provider.toLowerCase() === "workers-ai") {
       return createWorkersAI({ binding: this.env.AI })(entries[0]?.model ?? "@cf/moonshotai/kimi-k2.7-code");
     }
@@ -928,10 +931,16 @@ export class SheetsThink extends Think<Env> {
       if (typeof body.message !== "string" || !body.message.trim()) {
         return json({ error: "Send JSON with a non-empty 'message' string." }, { status: 400 });
       }
+      let selectedModel: ModelEntry | undefined;
+      try {
+        selectedModel = requestedModelEntry(this.env, body);
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "Invalid model." }, { status: 400 });
+      }
 
       const requestId = crypto.randomUUID();
       const startedAt = Date.now();
-      const model = modelConfig(this.env);
+      const model = modelConfig(this.env, selectedModel);
       this.recordTrace({
         detail: { message: body.message, model },
         requestId,
@@ -942,7 +951,7 @@ export class SheetsThink extends Think<Env> {
 
       try {
         const result = await generateText({
-          model: this.getModel(),
+          model: this.getModel(selectedModel),
           prompt: body.message,
           stopWhen: stepCountIs(6),
           system: this.getSystemPrompt(),

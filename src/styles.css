@@ -1012,7 +1012,19 @@
   }
 
   .model-badge {
-    @apply inline-flex min-h-10 shrink-0 items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 text-sm font-medium text-zinc-600 shadow-sm;
+    @apply relative inline-flex min-h-10 shrink-0 items-center gap-2 rounded-full border border-zinc-200 bg-white px-3 pr-9 text-sm font-medium text-zinc-600 shadow-sm;
+  }
+
+  .model-badge select {
+    @apply absolute inset-0 cursor-pointer appearance-none rounded-full border-0 bg-transparent opacity-0;
+  }
+
+  .model-badge select:disabled {
+    @apply cursor-not-allowed;
+  }
+
+  .model-badge > svg:last-child {
+    @apply pointer-events-none absolute right-3 text-zinc-500;
   }
 
   .source-panel {

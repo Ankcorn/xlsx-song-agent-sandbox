@@ -98,7 +98,43 @@ export type AgentTraceEvent = {
 export type AgentRequestPayload = {
   agentName?: unknown;
   message?: unknown;
+  model?: unknown;
   spreadsheetId?: unknown;
+};
+
+export type ModelEntry = {
+  model: string;
+  provider: string;
+};
+
+export type CodemodeExtraction = {
+  description: string;
+  filename: string;
+  format: string;
+  metadata: {
+    category: string;
+    caveats: string;
+    confidence_score: number;
+    description: string;
+    dimensions: Record<string, unknown>;
+    domain: string;
+    extraction_notes: string;
+    geography: string;
+    measures: Record<string, unknown>;
+    source_summary: string;
+    time_period: string;
+    title: string;
+    units: string;
+  };
+  tables: Array<{
+    columns: string[];
+    name: string;
+    rows: Array<{
+      cells: Record<string, string | number | boolean | null>;
+      source_ref: string;
+      source_row: number;
+    }>;
+  }>;
 };
 
 type SpreadsheetSearchCandidate = {
@@ -296,7 +332,102 @@ function balancedJsonSlice(text: string) {
   return text;
 }
 
-export function configuredModelEntries(env: Env) {
+function normalizeJsonValue(value: unknown): string | number | boolean | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (value instanceof Date) return value.toISOString();
+  return JSON.stringify(value);
+}
+
+export function normalizeCodemodeExtraction(value: unknown, filename: string): CodemodeExtraction {
+  const input = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const metadataInput = input.metadata && typeof input.metadata === "object" ? (input.metadata as Record<string, unknown>) : {};
+  const rawTables = Array.isArray(input.tables) ? input.tables : [];
+  const tables = rawTables.map((rawTable, tableIndex) => {
+    const table = rawTable && typeof rawTable === "object" ? (rawTable as Record<string, unknown>) : {};
+    const rawRows = Array.isArray(table.rows) ? table.rows : [];
+    const inferredColumns = new Set<string>();
+
+    for (const rawRow of rawRows) {
+      const row = rawRow && typeof rawRow === "object" ? (rawRow as Record<string, unknown>) : {};
+      const cells = row.cells && typeof row.cells === "object" ? (row.cells as Record<string, unknown>) : {};
+      for (const column of Object.keys(cells)) inferredColumns.add(column);
+    }
+
+    const listedColumns = Array.isArray(table.columns) ? table.columns : [];
+    const columns = [...listedColumns, ...[...inferredColumns].filter((column) => !listedColumns.includes(column))]
+      .map((column, columnIndex) => String(column || `column_${columnIndex + 1}`))
+      .filter(Boolean);
+
+    const rows = rawRows.map((rawRow, rowIndex) => {
+      const row = rawRow && typeof rawRow === "object" ? (rawRow as Record<string, unknown>) : {};
+      const cells = row.cells && typeof row.cells === "object" ? (row.cells as Record<string, unknown>) : {};
+      const sourceRow = typeof row.source_row === "number" && Number.isFinite(row.source_row) ? row.source_row : rowIndex + 1;
+      const normalizedCells: Record<string, string | number | boolean | null> = {};
+
+      for (const column of columns) {
+        normalizedCells[column] = normalizeJsonValue(cells[column]);
+      }
+
+      return {
+        cells: normalizedCells,
+        source_ref: typeof row.source_ref === "string" ? row.source_ref : `${table.name ?? `table_${tableIndex + 1}`}!row:${sourceRow}`,
+        source_row: sourceRow,
+      };
+    });
+
+    return {
+      columns,
+      name: typeof table.name === "string" && table.name.trim() ? table.name : `table_${tableIndex + 1}`,
+      rows,
+    };
+  });
+
+  const description =
+      typeof input.description === "string" && input.description.trim()
+        ? input.description
+        : typeof metadataInput.description === "string" && metadataInput.description.trim()
+          ? metadataInput.description
+          : `${filename} was analyzed in codemode into ${tables.length} table${tables.length === 1 ? "" : "s"}.`;
+  const metadata = {
+    category: typeof metadataInput.category === "string" && metadataInput.category.trim() ? metadataInput.category : "Uncategorised",
+    caveats: typeof metadataInput.caveats === "string" ? metadataInput.caveats : "",
+    confidence_score:
+      typeof metadataInput.confidence_score === "number" && Number.isFinite(metadataInput.confidence_score)
+        ? Math.max(0, Math.min(100, Math.round(metadataInput.confidence_score)))
+        : 75,
+    description,
+    dimensions:
+      metadataInput.dimensions && typeof metadataInput.dimensions === "object"
+        ? (metadataInput.dimensions as Record<string, unknown>)
+        : {},
+    domain: typeof metadataInput.domain === "string" && metadataInput.domain.trim() ? metadataInput.domain : "general",
+    extraction_notes: typeof metadataInput.extraction_notes === "string" ? metadataInput.extraction_notes : "",
+    geography: typeof metadataInput.geography === "string" ? metadataInput.geography : "",
+    measures:
+      metadataInput.measures && typeof metadataInput.measures === "object"
+        ? (metadataInput.measures as Record<string, unknown>)
+        : {},
+    source_summary: typeof metadataInput.source_summary === "string" ? metadataInput.source_summary : "",
+    time_period: typeof metadataInput.time_period === "string" ? metadataInput.time_period : "",
+    title:
+      typeof metadataInput.title === "string" && metadataInput.title.trim()
+        ? metadataInput.title
+        : filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "),
+    units: typeof metadataInput.units === "string" ? metadataInput.units : "",
+  };
+
+  return {
+    description,
+    filename: typeof input.filename === "string" ? input.filename : filename,
+    format: typeof input.format === "string" ? input.format : filename.split(".").pop()?.toLowerCase() ?? "unknown",
+    metadata,
+    tables,
+  };
+}
+
+export function configuredModelEntries(env: Env): ModelEntry[] {
   const fallbackEntries = env.AI_GATEWAY_FALLBACKS?.split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
@@ -320,8 +451,40 @@ export function configuredModelEntries(env: Env) {
   ];
 }
 
-export function modelConfig(env: Env) {
-  const entries = configuredModelEntries(env);
+export function modelKey(entry: ModelEntry) {
+  return `${entry.provider}:${entry.model}`;
+}
+
+export function requestedModelEntry(env: Env, payload: AgentRequestPayload): ModelEntry | undefined {
+  if (payload.model === undefined || payload.model === null || payload.model === "") return undefined;
+  if (typeof payload.model !== "object") {
+    throw new Error("Model must be an object with provider and model.");
+  }
+
+  const requested = payload.model as { model?: unknown; provider?: unknown };
+  const requestedProvider = requested.provider;
+  const requestedModel = requested.model;
+  if (typeof requestedProvider !== "string" || typeof requestedModel !== "string") {
+    throw new Error("Model must include string provider and model values.");
+  }
+
+  const configured = configuredModelEntries(env);
+  const match = configured.find(
+    (entry) => entry.provider.toLowerCase() === requestedProvider.toLowerCase() && entry.model === requestedModel,
+  );
+  if (!match) {
+    throw new Error(`Model ${requestedProvider}:${requestedModel} is not configured.`);
+  }
+
+  return match;
+}
+
+export function modelEntriesForRequest(env: Env, selectedModel?: ModelEntry) {
+  return selectedModel ? [selectedModel] : configuredModelEntries(env);
+}
+
+export function modelConfig(env: Env, selectedModel?: ModelEntry) {
+  const entries = modelEntriesForRequest(env, selectedModel);
   const primary = entries[0] ?? {
     model: DEFAULT_AI_GATEWAY_MODEL,
     provider: DEFAULT_AI_GATEWAY_PROVIDER,
@@ -335,6 +498,15 @@ export function modelConfig(env: Env) {
   };
 }
 
+function listAvailableModels(env: Env) {
+  const models = configuredModelEntries(env);
+  return json({
+    defaultModel: models[0] ?? null,
+    gatewayId: env.AI_GATEWAY_ID ?? "default",
+    models,
+  });
+}
+
 export function providerModel(providerName: string, modelId: string) {
   const provider = providerName.toLowerCase();
 
@@ -346,8 +518,8 @@ export function providerModel(providerName: string, modelId: string) {
   );
 }
 
-function modelForEnv(env: Env) {
-  const entries = configuredModelEntries(env);
+function modelForEnv(env: Env, selectedModel?: ModelEntry) {
+  const entries = modelEntriesForRequest(env, selectedModel);
   if (entries[0]?.provider.toLowerCase() === "workers-ai") {
     return createWorkersAI({ binding: env.AI })(entries[0]?.model ?? "@cf/moonshotai/kimi-k2.7-code");
   }
@@ -881,6 +1053,12 @@ async function sendAgentRequest(request: Request, env: Env) {
   if (typeof body.message !== "string" || !body.message.trim()) {
     return json({ error: "Send JSON with a non-empty 'message' string." }, { status: 400 });
   }
+  let selectedModel: ModelEntry | undefined;
+  try {
+    selectedModel = requestedModelEntry(env, body);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "Invalid model." }, { status: 400 });
+  }
 
   let agentName = typeof body.agentName === "string" && body.agentName.trim() ? body.agentName.trim() : "api-agent";
 
@@ -892,7 +1070,7 @@ async function sendAgentRequest(request: Request, env: Env) {
     agentName = spreadsheet.agent_name;
   }
 
-  return sendAgentMessage(env, agentName, body.message);
+  return sendAgentMessage(env, agentName, body.message, selectedModel);
 }
 
 async function sendSpreadsheetAgentRequest(request: Request, env: Env, spreadsheetId: string) {
@@ -905,8 +1083,14 @@ async function sendSpreadsheetAgentRequest(request: Request, env: Env, spreadshe
   if (typeof body.message !== "string" || !body.message.trim()) {
     return json({ error: "Send JSON with a non-empty 'message' string." }, { status: 400 });
   }
+  let selectedModel: ModelEntry | undefined;
+  try {
+    selectedModel = requestedModelEntry(env, body);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "Invalid model." }, { status: 400 });
+  }
 
-  return sendAgentMessage(env, spreadsheet.agent_name, body.message);
+  return sendAgentMessage(env, spreadsheet.agent_name, body.message, selectedModel);
 }
 
 async function sendBenchmarkQuery(request: Request, env: Env) {
@@ -914,14 +1098,20 @@ async function sendBenchmarkQuery(request: Request, env: Env) {
   if (typeof body.message !== "string" || !body.message.trim()) {
     return json({ error: "Send JSON with a non-empty 'message' string." }, { status: 400 });
   }
+  let selectedModel: ModelEntry | undefined;
+  try {
+    selectedModel = requestedModelEntry(env, body);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "Invalid model." }, { status: 400 });
+  }
 
   try {
     const startedAt = Date.now();
-    const selection = await selectSpreadsheetForPrompt(env, body.message);
+    const selection = await selectSpreadsheetForPrompt(env, body.message, selectedModel);
     const notReady = extractionNotReadyResponse(selection.spreadsheet);
     if (notReady) return notReady;
 
-    const answer = await fetchAgentMessageData(env, selection.spreadsheet.agent_name, body.message);
+    const answer = await fetchAgentMessageData(env, selection.spreadsheet.agent_name, body.message, selectedModel);
     const answerData = answer.data && typeof answer.data === "object" ? answer.data : { response: answer.data };
     return json(
       {
@@ -935,7 +1125,7 @@ async function sendBenchmarkQuery(request: Request, env: Env) {
         selection: {
           candidates: selection.candidates,
           durationMs: selection.durationMs,
-          model: modelConfig(env),
+          model: modelConfig(env, selectedModel),
           reason: selection.reason,
           score: selection.score,
           usage: selection.usage,
@@ -949,7 +1139,7 @@ async function sendBenchmarkQuery(request: Request, env: Env) {
   }
 }
 
-async function selectSpreadsheetForPrompt(env: Env, message: string) {
+async function selectSpreadsheetForPrompt(env: Env, message: string, selectedModel?: ModelEntry) {
   const candidates = await spreadsheetSearchCandidates(env);
   if (candidates.length === 0) {
     throw new Error("No ready spreadsheets are available to answer this prompt.");
@@ -968,7 +1158,7 @@ async function selectSpreadsheetForPrompt(env: Env, message: string) {
 
   const startedAt = Date.now();
   const result = await generateText({
-    model: modelForEnv(env),
+    model: modelForEnv(env, selectedModel),
     prompt: [
       "Choose the single spreadsheet that is most likely to answer the user's question.",
       "Return only JSON with keys: spreadsheet_id, reason, score.",
@@ -1065,7 +1255,7 @@ async function spreadsheetSearchCandidates(env: Env): Promise<SpreadsheetSearchC
   );
 }
 
-async function fetchAgentMessageData(env: Env, agentName: string, message: string) {
+async function fetchAgentMessageData(env: Env, agentName: string, message: string, selectedModel?: ModelEntry) {
   let stub: DurableObjectStub;
   if (agentName.startsWith("agent-")) {
     stub = env.AgentThink.get(env.AgentThink.idFromName(agentName));
@@ -1073,7 +1263,7 @@ async function fetchAgentMessageData(env: Env, agentName: string, message: strin
     stub = env.SheetsThink.get(env.SheetsThink.idFromName(agentName));
   }
   const response = await stub.fetch("https://agent.local/api-request", {
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, model: selectedModel }),
     headers: { "content-type": "application/json" },
     method: "POST",
   });
@@ -1085,8 +1275,8 @@ async function fetchAgentMessageData(env: Env, agentName: string, message: strin
   return { data, status: response.status };
 }
 
-async function sendAgentMessage(env: Env, agentName: string, message: string) {
-  const { data, status } = await fetchAgentMessageData(env, agentName, message);
+async function sendAgentMessage(env: Env, agentName: string, message: string, selectedModel?: ModelEntry) {
+  const { data, status } = await fetchAgentMessageData(env, agentName, message, selectedModel);
   return json(data, { status });
 }
 
@@ -1388,6 +1578,10 @@ export default {
 
     if (url.pathname === "/api/benchmarks/query" && request.method === "POST") {
       return sendBenchmarkQuery(request, env);
+    }
+
+    if (url.pathname === "/api/models" && request.method === "GET") {
+      return listAvailableModels(env);
     }
 
     if (url.pathname === "/api/spreadsheets" && request.method === "GET") {

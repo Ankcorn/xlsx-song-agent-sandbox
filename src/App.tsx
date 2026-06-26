@@ -18,6 +18,7 @@ import {
   BarChart3,
   Clock,
   Database,
+  ChevronDown,
   Download,
   FileSpreadsheet,
   FileText,
@@ -194,6 +195,17 @@ type AgentRequestResponse = {
     score?: number | null;
   };
   usage?: Record<string, unknown>;
+};
+
+type AiModelOption = {
+  model: string;
+  provider: string;
+};
+
+type AiModelsResponse = {
+  defaultModel: AiModelOption | null;
+  gatewayId: string;
+  models: AiModelOption[];
 };
 
 type BenchmarkRun = {
@@ -470,6 +482,15 @@ function formatSeconds(seconds: number | null | undefined) {
 
 function formatNumber(value: number | null | undefined) {
   return value === null || value === undefined ? "n/a" : value.toLocaleString();
+}
+
+function aiModelKey(model: AiModelOption) {
+  return `${model.provider}:${model.model}`;
+}
+
+function aiModelLabel(model: AiModelOption | null | undefined) {
+  if (!model) return "Loading models";
+  return `${model.provider} · ${model.model}`;
 }
 
 function formatDateTime(value: string) {
@@ -2404,6 +2425,8 @@ function BenchmarkDashboardPage() {
   const [spreadsheetId, setSpreadsheetId] = useState("");
   const [prompt, setPrompt] = useState("Summarize this spreadsheet and cite the most important rows.");
   const [preExtract, setPreExtract] = useState(true);
+  const [models, setModels] = useState<AiModelOption[]>([]);
+  const [selectedModelKey, setSelectedModelKey] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [runs, setRuns] = useState<BenchmarkRun[]>(() => {
@@ -2418,6 +2441,24 @@ function BenchmarkDashboardPage() {
     localStorage.setItem("xlsx-song-benchmark-runs", JSON.stringify(runs));
   }, [runs]);
 
+  useEffect(() => {
+    let isMounted = true;
+    fetchJson<AiModelsResponse>("/api/models")
+      .then((data) => {
+        if (!isMounted) return;
+        setModels(data.models);
+        const defaultKey = data.defaultModel ? aiModelKey(data.defaultModel) : "";
+        setSelectedModelKey((current) => current || defaultKey);
+      })
+      .catch((caught: Error) => {
+        if (isMounted) setError(caught.message);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   const completedRuns = runs.filter((run) => !run.error);
   const averageAnswerSeconds = average(completedRuns.map((run) => run.answerSeconds));
   const averageTotalTokens = average(completedRuns.map((run) => run.totalTokens));
@@ -2430,6 +2471,7 @@ function BenchmarkDashboardPage() {
     "Summarize totals by category.",
     "Find the highest value and explain why.",
   ];
+  const selectedModel = models.find((model) => aiModelKey(model) === selectedModelKey) ?? models[0] ?? null;
 
   async function submitBenchmark(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2465,7 +2507,7 @@ function BenchmarkDashboardPage() {
       const answerStarted = performance.now();
       const endpoint = targetSpreadsheetId ? `/api/spreadsheets/${targetSpreadsheetId}/agent-request` : "/api/benchmarks/query";
       const answer = await fetchJson<AgentRequestResponse>(endpoint, {
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, model: selectedModel }),
         headers: { "content-type": "application/json" },
         method: "POST",
       });
@@ -2593,7 +2635,20 @@ function BenchmarkDashboardPage() {
           </div>
           <div className="model-badge">
             <Sparkles size={16} />
-            <span>{latestRun ? `${latestRun.modelProvider ?? "model"} · ${latestRun.modelName ?? "unknown"}` : "Awaiting first run"}</span>
+            <span>{aiModelLabel(selectedModel)}</span>
+            <select
+              aria-label="Benchmark model"
+              disabled={isRunning || models.length === 0}
+              value={selectedModelKey}
+              onChange={(event) => setSelectedModelKey(event.target.value)}
+            >
+              {models.map((model) => (
+                <option key={aiModelKey(model)} value={aiModelKey(model)}>
+                  {aiModelLabel(model)}
+                </option>
+              ))}
+            </select>
+            <ChevronDown size={16} />
           </div>
         </header>
 
