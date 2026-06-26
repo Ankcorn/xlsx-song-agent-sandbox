@@ -215,6 +215,15 @@ type DatasetAgentStep = {
   title: string;
 };
 
+type PendingDatasetAnswer = {
+  answerStartedAt: number;
+  messageId: string;
+  prompt: string;
+  spreadsheetFilename: string;
+  spreadsheetId: string;
+  totalStartedAt: number;
+};
+
 type BenchmarkSelectionCandidate = {
   columns?: string[];
   description?: string | null;
@@ -2690,6 +2699,67 @@ function AskDataPage() {
   const [steps, setSteps] = useState<DatasetAgentStep[]>([]);
   const [showEvidence, setShowEvidence] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+  const [pendingAnswers, setPendingAnswers] = useState<PendingDatasetAnswer[]>([]);
+
+  async function saveCompletedAnswer(answer: AgentRequestResponse, pending: PendingDatasetAnswer) {
+    setSteps(answer.steps ?? []);
+    const run = createBenchmarkRunFromAnswer({
+      answer,
+      answerSeconds: (performance.now() - pending.answerStartedAt) / 1000,
+      prompt: pending.prompt,
+      spreadsheetFilename: answer.selectedSpreadsheet?.filename ?? answer.importedSpreadsheet?.filename ?? pending.spreadsheetFilename,
+      spreadsheetId: answer.selectedSpreadsheet?.id ?? answer.importedSpreadsheet?.id ?? pending.spreadsheetId,
+      totalSeconds: (performance.now() - pending.totalStartedAt) / 1000,
+      uploadSeconds: null,
+    });
+    const savedRun = await saveBenchmarkRun(run);
+    setLatestRun(savedRun);
+  }
+
+  useEffect(() => {
+    if (pendingAnswers.length === 0) return undefined;
+
+    let cancelled = false;
+    const timers = new Set<number>();
+
+    pendingAnswers.forEach((pending) => {
+      const poll = async () => {
+        try {
+          const answer = await fetchJson<AgentRequestResponse>("/api/dataset-agent/pending-answer", {
+            body: JSON.stringify({ message: pending.prompt, spreadsheetId: pending.spreadsheetId }),
+            headers: { "content-type": "application/json" },
+            method: "POST",
+          });
+          if (cancelled) return;
+
+          if (answer.finishReason === "import_pending") {
+            setSteps(answer.steps ?? []);
+            const timer = window.setTimeout(poll, 10_000);
+            timers.add(timer);
+            return;
+          }
+
+          setPendingAnswers((current) => current.filter((item) => item.messageId !== pending.messageId));
+          setMessages((current) => current.map((message) => (message.id === pending.messageId ? { ...message, text: answer.response } : message)));
+          await saveCompletedAnswer(answer, pending);
+        } catch (caught) {
+          if (cancelled) return;
+          const message = caught instanceof Error ? caught.message : "Dataset answer failed";
+          setPendingAnswers((current) => current.filter((item) => item.messageId !== pending.messageId));
+          setSteps((current) => [...current, { detail: message, status: "error", title: "Dataset answer failed" }]);
+          setMessages((current) => current.map((item) => (item.id === pending.messageId ? { ...item, text: message } : item)));
+        }
+      };
+
+      const timer = window.setTimeout(poll, 10_000);
+      timers.add(timer);
+    });
+
+    return () => {
+      cancelled = true;
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [pendingAnswers]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2711,6 +2781,23 @@ function AskDataPage() {
         method: "POST",
       });
       setSteps(answer.steps ?? []);
+      if (answer.finishReason === "import_pending" && answer.importedSpreadsheet) {
+        const messageId = answer.requestId;
+        const importedSpreadsheet = answer.importedSpreadsheet;
+        setMessages((current) => [...current, { id: messageId, role: "assistant", text: answer.response }]);
+        setPendingAnswers((current) => [
+          ...current,
+          {
+            answerStartedAt: performance.now(),
+            messageId,
+            prompt: text,
+            spreadsheetFilename: importedSpreadsheet.filename,
+            spreadsheetId: importedSpreadsheet.id,
+            totalStartedAt: totalStarted,
+          },
+        ]);
+        return;
+      }
       const run = createBenchmarkRunFromAnswer({
         answer,
         answerSeconds: (performance.now() - answerStarted) / 1000,
@@ -2755,6 +2842,7 @@ function AskDataPage() {
               setMessages([]);
               setLatestRun(null);
               setSteps([]);
+              setPendingAnswers([]);
               setShowEvidence(false);
             }}
           >

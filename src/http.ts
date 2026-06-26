@@ -190,6 +190,8 @@ type DatasetAgentRequestPayload = AgentRequestPayload & {
   category?: unknown;
 };
 
+type DatasetAgentPendingPayload = AgentRequestPayload;
+
 type DataGovPackage = {
   id?: string;
   notes?: string;
@@ -1326,15 +1328,71 @@ async function importDataGovResource(env: Env, message: string, dataset: DataGov
   const spreadsheetId = upload.spreadsheet?.id;
   if (!spreadsheetId) throw new Error("Imported spreadsheet id was not returned.");
 
-  const timeoutMs = 105_000;
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
-    if (spreadsheet?.status === "ready" || spreadsheet?.status === "failed") return spreadsheet;
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+  return getSpreadsheetRow(env, spreadsheetId);
+}
+
+async function answerImportedDatasetRequest(request: Request, env: Env) {
+  const body = (await request.json().catch(() => ({}))) as DatasetAgentPendingPayload;
+  if (typeof body.message !== "string" || !body.message.trim()) {
+    return json({ error: "Send JSON with a non-empty 'message' string." }, { status: 400 });
+  }
+  if (typeof body.spreadsheetId !== "string" || !body.spreadsheetId.trim()) {
+    return json({ error: "Send JSON with a non-empty 'spreadsheetId' string." }, { status: 400 });
   }
 
-  return getSpreadsheetRow(env, spreadsheetId);
+  let selectedModel: ModelEntry | undefined;
+  try {
+    selectedModel = requestedModelEntry(env, body);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "Invalid model." }, { status: 400 });
+  }
+
+  const message = body.message.trim();
+  const spreadsheet = await getSpreadsheetRow(env, body.spreadsheetId.trim());
+  if (!spreadsheet) return json({ error: "Spreadsheet not found." }, { status: 404 });
+
+  if (spreadsheet.status === "processing") {
+    return json({
+      agentName: spreadsheet.agent_name,
+      finishReason: "import_pending",
+      importedSpreadsheet: { filename: spreadsheet.filename, id: spreadsheet.id },
+      model: modelConfig(env, selectedModel),
+      requestId: crypto.randomUUID(),
+      response: `I am still processing ${spreadsheet.filename}. I will answer this question as soon as the dataset is ready.`,
+      selectedSpreadsheet: { filename: spreadsheet.filename, id: spreadsheet.id, reason: "Imported from data.gov.uk and still processing.", score: null },
+      steps: [{ detail: { filename: spreadsheet.filename, id: spreadsheet.id }, status: "running", title: "Processing imported dataset" }],
+      usage: null,
+    });
+  }
+
+  if (spreadsheet.status === "failed") {
+    return json({
+      agentName: spreadsheet.agent_name,
+      error: spreadsheet.error_message ?? "Imported dataset processing failed.",
+      finishReason: "import_failed",
+      importedSpreadsheet: { filename: spreadsheet.filename, id: spreadsheet.id },
+      model: modelConfig(env, selectedModel),
+      requestId: crypto.randomUUID(),
+      response: `Sorry, I imported ${spreadsheet.filename}, but processing failed before I could answer.`,
+      selectedSpreadsheet: { filename: spreadsheet.filename, id: spreadsheet.id, reason: "Imported from data.gov.uk, but processing failed.", score: null },
+      steps: [{ detail: spreadsheet.error_message ?? "Processing failed.", status: "error", title: "Imported dataset processing failed" }],
+      usage: null,
+    });
+  }
+
+  const answer = await fetchAgentMessageData(env, spreadsheet.agent_name, message, selectedModel);
+  const data = answer.data && typeof answer.data === "object" ? answer.data : { response: answer.data };
+  const responseText = typeof (data as { response?: unknown }).response === "string" ? (data as { response: string }).response : "";
+  return json(
+    {
+      ...data,
+      response: responseText,
+      importedSpreadsheet: { filename: spreadsheet.filename, id: spreadsheet.id },
+      selectedSpreadsheet: { filename: spreadsheet.filename, id: spreadsheet.id, reason: "Imported from data.gov.uk and answered after processing completed.", score: null },
+      steps: [{ detail: { filename: spreadsheet.filename, id: spreadsheet.id }, status: "done", title: "Imported dataset ready" }],
+    },
+    { status: answer.status },
+  );
 }
 
 async function sendDatasetAgentRequest(request: Request, env: Env) {
@@ -1418,15 +1476,25 @@ async function sendDatasetAgentRequest(request: Request, env: Env) {
     };
     steps.push({ status: "running", title: "Importing data.gov.uk file" });
     const imported = await importDataGovResource(env, message, best.dataset, best.resource);
-    if (!imported || imported.status !== "ready") {
-      steps[steps.length - 1] = { detail: { status: imported?.status ?? "unknown" }, status: "error", title: "Imported dataset is not ready yet" };
+    if (!imported) throw new Error("Imported spreadsheet could not be loaded.");
+    if (imported.status !== "ready") {
+      const isFailed = imported?.status === "failed";
+      steps[steps.length - 1] = {
+        detail: { error: imported?.error_message ?? null, status: imported?.status ?? "unknown" },
+        status: isFailed ? "error" : "running",
+        title: isFailed ? "Imported dataset processing failed" : "Imported dataset processing in background",
+      };
       return json({
-        agentName: imported?.agent_name ?? "dataset-agent",
-        finishReason: "import_pending",
+        agentName: imported.agent_name,
+        ...(isFailed ? { error: imported.error_message ?? "Imported dataset processing failed." } : {}),
+        finishReason: isFailed ? "import_failed" : "import_pending",
+        importedSpreadsheet: { filename: imported.filename, id: imported.id },
         model: modelConfig(env, selectedModel),
         requestId: crypto.randomUUID(),
-        response: `I found and imported ${best.dataset.title ?? best.resource.name ?? "a data.gov.uk dataset"}, but it is still being processed. Please retry shortly.`,
-        selectedSpreadsheet: imported ? { filename: imported.filename, id: imported.id, reason: "Imported from data.gov.uk.", score: best.score } : undefined,
+        response: isFailed
+          ? `I found and imported ${best.dataset.title ?? best.resource.name ?? "a data.gov.uk dataset"}, but processing failed before I could answer.`
+          : `I found and imported ${best.dataset.title ?? best.resource.name ?? "a data.gov.uk dataset"}. I am processing it in the background and will answer when it is ready.`,
+        selectedSpreadsheet: { filename: imported.filename, id: imported.id, reason: "Imported from data.gov.uk.", score: best.score },
         steps,
         totalDurationMs: Date.now() - startedAt,
         usage: null,
@@ -2034,6 +2102,10 @@ export default {
 
     if (url.pathname === "/api/dataset-agent/request" && request.method === "POST") {
       return sendDatasetAgentRequest(request, env);
+    }
+
+    if (url.pathname === "/api/dataset-agent/pending-answer" && request.method === "POST") {
+      return answerImportedDatasetRequest(request, env);
     }
 
     if (url.pathname === "/api/benchmarks/query" && request.method === "POST") {
