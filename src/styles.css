@@ -1509,6 +1509,129 @@
     @apply min-h-44 justify-center;
   }
 
+  .benchmark-comparison,
+  .benchmark-comparison-empty {
+    @apply rounded-xl border border-zinc-200 bg-white p-5 shadow-sm;
+  }
+
+  .benchmark-comparison {
+    @apply grid gap-5;
+  }
+
+  .benchmark-comparison-empty {
+    @apply flex items-center gap-3 text-zinc-500;
+  }
+
+  .benchmark-comparison-empty h2 {
+    @apply text-base font-semibold text-zinc-950;
+  }
+
+  .benchmark-comparison-header {
+    @apply flex flex-wrap items-start justify-between gap-4;
+  }
+
+  .benchmark-comparison-grid {
+    @apply grid grid-cols-[minmax(0,1fr)_280px] gap-4;
+  }
+
+  .benchmark-winner-stack {
+    @apply grid gap-3;
+  }
+
+  .benchmark-winner-stack .metric-card {
+    @apply min-h-0;
+  }
+
+  .benchmark-access-cards {
+    @apply grid gap-3 md:grid-cols-2;
+  }
+
+  .benchmark-access-cards article {
+    @apply grid gap-4 rounded-lg border border-zinc-200 bg-zinc-50 p-4;
+  }
+
+  .benchmark-access-cards header {
+    @apply flex items-start justify-between gap-3;
+  }
+
+  .benchmark-access-cards h3 {
+    @apply text-base font-semibold text-zinc-950;
+  }
+
+  .benchmark-access-cards dl {
+    @apply grid grid-cols-4 gap-2;
+  }
+
+  .benchmark-access-cards dt {
+    @apply text-xs font-semibold uppercase tracking-wide text-zinc-500;
+  }
+
+  .benchmark-access-cards dd {
+    @apply mt-1 text-sm font-semibold text-zinc-950;
+  }
+
+  .benchmark-scatter {
+    @apply relative min-h-80 rounded-lg border border-zinc-200 bg-zinc-50 p-8;
+  }
+
+  .scatter-frame {
+    @apply relative h-full min-h-64 rounded-xl border-2 border-zinc-900 bg-white;
+  }
+
+  .scatter-frame::before,
+  .scatter-frame::after {
+    content: "";
+    @apply absolute bg-zinc-100;
+  }
+
+  .scatter-frame::before {
+    @apply left-1/2 top-0 h-full w-px;
+  }
+
+  .scatter-frame::after {
+    @apply left-0 top-1/2 h-px w-full;
+  }
+
+  .scatter-axis {
+    @apply absolute text-xs font-semibold uppercase tracking-wide text-zinc-500;
+  }
+
+  .scatter-axis.y-top {
+    @apply left-2 top-3;
+  }
+
+  .scatter-axis.y-bottom {
+    @apply bottom-3 left-2;
+  }
+
+  .scatter-axis.x-left {
+    @apply bottom-2 left-28;
+  }
+
+  .scatter-axis.x-right {
+    @apply bottom-2 right-8;
+  }
+
+  .scatter-point {
+    @apply absolute z-10 grid min-w-36 -translate-x-1/2 -translate-y-1/2 gap-1 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs shadow-md;
+  }
+
+  .scatter-point strong {
+    @apply text-sm font-semibold text-zinc-950;
+  }
+
+  .scatter-point span {
+    @apply font-medium text-zinc-500;
+  }
+
+  .scatter-point.sqlite {
+    @apply border-teal-300 bg-teal-50;
+  }
+
+  .scatter-point.raw {
+    @apply border-violet-300 bg-violet-50;
+  }
+
   .benchmark-table-wrap {
     @apply overflow-auto;
   }
@@ -1663,6 +1786,7 @@
 
     .analytics-page,
     .answer-canvas,
+    .benchmark-comparison-grid,
     .chat-main,
     .chat-main.trace-collapsed,
     .chat-stickybar,
@@ -1683,6 +1807,10 @@
 
     .thoughtspot-search .primary-button {
       @apply col-span-full justify-center;
+    }
+
+    .benchmark-access-cards dl {
+      @apply grid-cols-2;
     }
 
     .spreadsheet-row {

@@ -357,6 +357,17 @@ type BenchmarkModelAggregate = {
   runs: number;
 };
 
+type BenchmarkAccessSummary = {
+  accessMode: string;
+  averageCost: number | null;
+  averageQuality: number | null;
+  averageSeconds: number | null;
+  averageTokens: number | null;
+  errorCount: number;
+  runs: number;
+  wins: number;
+};
+
 type BenchmarkRunsResponse = {
   runs: BenchmarkRun[];
 };
@@ -1106,6 +1117,44 @@ function benchmarkModelAggregates(runs: BenchmarkRun[]): BenchmarkModelAggregate
       runs: groupRuns.length,
     };
   });
+}
+
+function benchmarkGroupId(run: BenchmarkRun) {
+  const value = run.evidence && (run.evidence as Record<string, unknown>).benchmarkGroupId;
+  return typeof value === "string" && value ? value : null;
+}
+
+function benchmarkWinner(run: BenchmarkRun) {
+  const value = run.evidence && (run.evidence as Record<string, unknown>).winner;
+  return typeof value === "string" && value ? value : null;
+}
+
+function benchmarkAccessSummaries(runs: BenchmarkRun[]): BenchmarkAccessSummary[] {
+  const byMode = new Map<string, BenchmarkRun[]>();
+  for (const run of runs) {
+    const mode = benchmarkAccessMode(run);
+    if (!byMode.has(mode)) byMode.set(mode, []);
+    byMode.get(mode)?.push(run);
+  }
+
+  return Array.from(byMode.entries())
+    .map(([accessMode, items]) => ({
+      accessMode,
+      averageCost: average(items.map((run) => run.evidence?.estimatedCostUsd)),
+      averageQuality: average(items.map((run) => run.quality)),
+      averageSeconds: average(items.filter((run) => !run.error).map((run) => run.answerSeconds)),
+      averageTokens: average(items.map((run) => run.totalTokens)),
+      errorCount: items.filter((run) => run.error).length,
+      runs: items.length,
+      wins: items.filter((run) => benchmarkWinner(run) === accessMode).length,
+    }))
+    .sort((a, b) => b.wins - a.wins || (a.averageSeconds ?? Number.POSITIVE_INFINITY) - (b.averageSeconds ?? Number.POSITIVE_INFINITY));
+}
+
+function accessModeLabel(accessMode: string) {
+  if (accessMode === "raw") return "Python sandbox";
+  if (accessMode === "sqlite") return "Pre-extracted SQLite";
+  return accessMode;
 }
 
 function formatCurrency(value: number | null | undefined) {
@@ -4258,6 +4307,8 @@ function BenchmarkDashboardPage() {
   }, []);
 
   const completedRuns = runs.filter((run) => !run.error);
+  const accessSummaries = benchmarkAccessSummaries(runs.filter((run) => ["sqlite", "raw"].includes(benchmarkAccessMode(run))));
+  const comparisonRuns = runs.filter((run) => Boolean(benchmarkGroupId(run)) || ["sqlite", "raw"].includes(benchmarkAccessMode(run)));
   const averageAnswerSeconds = average(completedRuns.map((run) => run.answerSeconds));
   const averageTotalTokens = average(completedRuns.map((run) => run.totalTokens));
   const averageQuality = average(completedRuns.map((run) => run.quality));
@@ -4338,9 +4389,115 @@ function BenchmarkDashboardPage() {
 
         {error ? <Banner variant="error" title="Benchmark log error" description={error} /> : null}
         {isLoading ? <div className="status-line"><Loader size="sm" /><span>Loading benchmark runs</span></div> : null}
+        <BenchmarkAccessOverview runs={comparisonRuns} summaries={accessSummaries} />
         <BenchmarkResults deleteRun={deleteRun} runs={runs} setQuality={setQuality} />
       </main>
     </section>
+  );
+}
+
+function BenchmarkAccessOverview({ runs, summaries }: { runs: BenchmarkRun[]; summaries: BenchmarkAccessSummary[] }) {
+  if (summaries.length === 0) {
+    return (
+      <section className="benchmark-comparison-empty">
+        <BarChart3 size={24} />
+        <div>
+          <h2>No access-mode comparison yet</h2>
+          <p className="muted">Run the data.gov.uk benchmark with sqlite and raw modes to populate this chart.</p>
+        </div>
+      </section>
+    );
+  }
+
+  const latestGroup = runs.map(benchmarkGroupId).find(Boolean);
+  const fastest = summaries.reduce((best, item) => ((item.averageSeconds ?? Infinity) < (best.averageSeconds ?? Infinity) ? item : best), summaries[0]);
+  const cheapest = summaries.reduce((best, item) => ((item.averageCost ?? Infinity) < (best.averageCost ?? Infinity) ? item : best), summaries[0]);
+  const mostWins = summaries.reduce((best, item) => (item.wins > best.wins ? item : best), summaries[0]);
+
+  return (
+    <section className="benchmark-comparison">
+      <header className="benchmark-comparison-header">
+        <div>
+          <p className="eyebrow">Access benchmark</p>
+          <h2>SQLite extraction vs Python sandbox</h2>
+          <p className="muted">Scores combine saved winner flags, quality ratings, speed, token use, and estimated model cost.</p>
+        </div>
+        {latestGroup ? <Badge variant="neutral">{latestGroup}</Badge> : null}
+      </header>
+
+      <div className="benchmark-comparison-grid">
+        <BenchmarkScatter summaries={summaries} />
+        <div className="benchmark-winner-stack">
+          <MetricCard icon={<Star size={18} />} label="Most wins" value={`${accessModeLabel(mostWins.accessMode)} · ${mostWins.wins}`} />
+          <MetricCard icon={<Clock size={18} />} label="Fastest avg" value={`${accessModeLabel(fastest.accessMode)} · ${formatSeconds(fastest.averageSeconds)}`} />
+          <MetricCard icon={<Gauge size={18} />} label="Cheapest avg" value={`${accessModeLabel(cheapest.accessMode)} · ${formatCurrency(cheapest.averageCost)}`} />
+        </div>
+      </div>
+
+      <div className="benchmark-access-cards">
+        {summaries.map((summary) => (
+          <article key={summary.accessMode}>
+            <header>
+              <div>
+                <p className="eyebrow">{summary.accessMode}</p>
+                <h3>{accessModeLabel(summary.accessMode)}</h3>
+              </div>
+              <Badge variant={summary.errorCount > 0 ? "warning" : "success"}>{summary.runs - summary.errorCount}/{summary.runs} ok</Badge>
+            </header>
+            <dl>
+              <div>
+                <dt>Wins</dt>
+                <dd>{summary.wins}</dd>
+              </div>
+              <div>
+                <dt>Avg speed</dt>
+                <dd>{formatSeconds(summary.averageSeconds)}</dd>
+              </div>
+              <div>
+                <dt>Avg cost</dt>
+                <dd>{formatCurrency(summary.averageCost)}</dd>
+              </div>
+              <div>
+                <dt>Avg quality</dt>
+                <dd>{summary.averageQuality === null ? "n/a" : `${summary.averageQuality.toFixed(1)}/5`}</dd>
+              </div>
+            </dl>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function BenchmarkScatter({ summaries }: { summaries: BenchmarkAccessSummary[] }) {
+  const speeds = summaries.map((item) => item.averageSeconds).filter((value): value is number => typeof value === "number");
+  const costs = summaries.map((item) => item.averageCost).filter((value): value is number => typeof value === "number");
+  const minSpeed = Math.min(...speeds, 0);
+  const maxSpeed = Math.max(...speeds, 1);
+  const minCost = Math.min(...costs, 0);
+  const maxCost = Math.max(...costs, 0.01);
+
+  return (
+    <div className="benchmark-scatter" aria-label="Benchmark speed and cost scatter plot">
+      <span className="scatter-axis y-top">fast</span>
+      <span className="scatter-axis y-bottom">slow</span>
+      <span className="scatter-axis x-left">expensive</span>
+      <span className="scatter-axis x-right">free</span>
+      <div className="scatter-frame">
+        {summaries.map((summary) => {
+          const speed = summary.averageSeconds ?? maxSpeed;
+          const cost = summary.averageCost ?? maxCost;
+          const x = 12 + (1 - (cost - minCost) / Math.max(maxCost - minCost, 0.0001)) * 76;
+          const y = 12 + ((speed - minSpeed) / Math.max(maxSpeed - minSpeed, 0.0001)) * 76;
+          return (
+            <div className={`scatter-point ${summary.accessMode}`} key={summary.accessMode} style={{ left: `${x}%`, top: `${y}%` }}>
+              <strong>{accessModeLabel(summary.accessMode)}</strong>
+              <span>{formatSeconds(summary.averageSeconds)} · {formatCurrency(summary.averageCost)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
