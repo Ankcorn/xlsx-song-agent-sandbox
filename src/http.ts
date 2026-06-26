@@ -192,6 +192,7 @@ type BenchmarkRunPayload = {
 };
 
 type SpeechPayload = {
+  language?: unknown;
   text?: unknown;
 };
 
@@ -685,6 +686,40 @@ function cleanCategory(value: unknown) {
   return trimmed ? trimmed.slice(0, 80) : "Uncategorised";
 }
 
+type SpeechLanguage = "english" | "welsh" | "gaelic";
+
+const speechLanguageLabels: Record<SpeechLanguage, string> = {
+  english: "English",
+  gaelic: "Scottish Gaelic",
+  welsh: "Welsh",
+};
+
+function cleanSpeechLanguage(value: unknown): SpeechLanguage {
+  return value === "welsh" || value === "gaelic" ? value : "english";
+}
+
+async function translateSpeechText(text: string, language: SpeechLanguage, env: Env) {
+  if (language === "english") return text;
+
+  try {
+    const result = await generateText({
+      model: modelForEnv(env),
+      prompt: [
+        `Translate the following short spoken summary into ${speechLanguageLabels[language]}.`,
+        "Keep names, numbers, percentages, currencies, table names, and source references unchanged.",
+        "Return only the translated text. No markdown. No explanation.",
+        "",
+        text,
+      ].join("\n"),
+      temperature: 0,
+    });
+    const translated = result.text.trim();
+    return translated || text;
+  } catch {
+    return text;
+  }
+}
+
 export function safeTraceDetail(detail: unknown) {
   if (detail === undefined) return null;
 
@@ -709,13 +744,14 @@ export function jsonRenderResponseInstructions() {
   return [
     "For user-facing answers, return ONLY a valid json-render React flat spec JSON object. Do not return markdown, prose outside JSON, or fenced code blocks.",
     "The spec shape must be: {\"root\":\"root\",\"elements\":{\"root\":{\"type\":\"Stack\",\"props\":{\"direction\":\"vertical\",\"gap\":\"lg\"},\"children\":[...]}, ...}}.",
-    "Available components: Stack, Grid, Card, Heading, Text, Badge, Alert, Separator, Table, StatGrid, BarChart, KeyValueList, DataTable.",
-    "Use Heading and Text for prose sections. Use StatGrid for KPIs, counts, totals, percentages, scores, and deltas. Use DataTable or Table for compact tabular facts. Use BarChart for comparisons across categories, periods, ranked values, or distributions. Use KeyValueList for metadata, assumptions, source notes, and citations. Use Alert for warnings, caveats, or important findings. Use Card/Grid/Stack to compose the answer.",
+    "Available components: Stack, Grid, Card, Heading, Text, Badge, Alert, Separator, Table, StatGrid, BarChart, LineChart, AreaChart, VerticalBarChart, PieChart, ScatterChart, ComposedChart, KeyValueList, DataTable.",
+    "Use Heading and Text for prose sections. Use StatGrid for KPIs, counts, totals, percentages, scores, and deltas. Use DataTable or Table for compact tabular facts. Use BarChart for ranked horizontal comparisons. Use LineChart for trends over time, AreaChart for volumes/cumulative trends, VerticalBarChart for category-by-period or grouped bars, PieChart for small part-to-whole splits, ScatterChart for relationships between two numeric measures, and ComposedChart when bars plus a trend line clarify the story. Use KeyValueList for metadata, assumptions, source notes, and citations. Use Alert for warnings, caveats, or important findings. Use Card/Grid/Stack to compose the answer.",
     "Keep the UI compact because it renders inside a chat message. Do not emit empty Heading or Text elements. Avoid deep nesting and avoid wrapping every section in a Card.",
     "Use at most 3 StatGrid items by default; use 4 only when all labels and values are short. Do not put long filenames, IDs, or prose into StatGrid values. Put those in KeyValueList, DataTable captions, or short Text instead.",
     "Keep tables small and readable. Prefer 3-8 rows unless the user asks for exhaustive output. Include source_ref/source_row/source table notes in KeyValueList or captions when available.",
     "All display text must be in props. Do not put markdown headings, bullets, or tables inside Text. Use multiple json-render elements instead.",
-    "Example custom components: {\"type\":\"StatGrid\",\"props\":{\"items\":[{\"label\":\"Rows\",\"value\":\"1,019\",\"delta\":null,\"description\":\"Total entities found\"}]},\"children\":[]}; {\"type\":\"BarChart\",\"props\":{\"title\":\"Entities by sector\",\"valueLabel\":\"entities\",\"data\":[{\"label\":\"Central Government\",\"value\":657}]},\"children\":[]}; {\"type\":\"DataTable\",\"props\":{\"columns\":[\"Sector\",\"Entity Count\"],\"rows\":[{\"Sector\":\"Central Government\",\"Entity Count\":\"657\"}],\"caption\":\"Derived from extracted table\"},\"children\":[]}.",
+    "Axis chart props shape: {\"title\":\"...\",\"description\":null,\"xKey\":\"period\",\"yLabel\":null,\"height\":280,\"series\":[{\"key\":\"value\",\"label\":\"Value\",\"color\":null}],\"data\":[{\"period\":\"2024\",\"value\":42}]}. PieChart props shape: {\"title\":\"...\",\"description\":null,\"valueLabel\":\"items\",\"donut\":true,\"height\":260,\"data\":[{\"label\":\"A\",\"value\":10,\"color\":null}]}. ScatterChart props shape: {\"title\":\"...\",\"description\":null,\"xKey\":\"x\",\"yKey\":\"y\",\"nameKey\":null,\"color\":null,\"height\":280,\"data\":[{\"x\":1,\"y\":2,\"label\":\"A\"}]}. ComposedChart props shape: {\"title\":\"...\",\"description\":null,\"xKey\":\"period\",\"height\":300,\"bars\":[{\"key\":\"count\",\"label\":\"Count\",\"color\":null}],\"lines\":[{\"key\":\"rate\",\"label\":\"Rate\",\"color\":null}],\"areas\":[],\"data\":[{\"period\":\"Q1\",\"count\":100,\"rate\":4.2}]}.",
+    "Example custom components: {\"type\":\"StatGrid\",\"props\":{\"items\":[{\"label\":\"Rows\",\"value\":\"1,019\",\"delta\":null,\"description\":\"Total entities found\"}]},\"children\":[]}; {\"type\":\"LineChart\",\"props\":{\"title\":\"Inflation over time\",\"description\":null,\"xKey\":\"month\",\"yLabel\":\"%\",\"height\":280,\"series\":[{\"key\":\"inflation\",\"label\":\"Inflation\",\"color\":null}],\"data\":[{\"month\":\"Jan\",\"inflation\":4.1}]},\"children\":[]}; {\"type\":\"BarChart\",\"props\":{\"title\":\"Entities by sector\",\"valueLabel\":\"entities\",\"data\":[{\"label\":\"Central Government\",\"value\":657}]},\"children\":[]}; {\"type\":\"DataTable\",\"props\":{\"columns\":[\"Sector\",\"Entity Count\"],\"rows\":[{\"Sector\":\"Central Government\",\"Entity Count\":\"657\"}],\"caption\":\"Derived from extracted table\"},\"children\":[]}.",
   ].join("\n");
 }
 
@@ -1599,6 +1635,8 @@ async function createSpeech(request: Request, env: Env) {
   const body = (await request.json().catch(() => ({}))) as SpeechPayload;
   const text = typeof body.text === "string" ? body.text.trim() : "";
   if (!text) return json({ error: "Send JSON with a non-empty 'text' string." }, { status: 400 });
+  const language = cleanSpeechLanguage(body.language);
+  const speechText = await translateSpeechText(text, language, env);
 
   const voiceId = env.ELEVENLABS_VOICE_ID || "JBFqnCBsd6RMkjVDRZzb";
   const modelId = env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
@@ -1609,7 +1647,7 @@ async function createSpeech(request: Request, env: Env) {
   const response = await fetch(speechUrl, {
     body: JSON.stringify({
       model_id: modelId,
-      text: text.slice(0, 5000),
+      text: speechText.slice(0, 5000),
     }),
     headers: {
       "content-type": "application/json",

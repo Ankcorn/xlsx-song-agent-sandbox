@@ -35,6 +35,7 @@
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "recharts": "^3.9.0",
     "workers-ai-provider": "^3.2.1",
     "zod": "^4.0.0"
   },

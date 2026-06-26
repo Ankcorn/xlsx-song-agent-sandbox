@@ -317,6 +317,14 @@ type AiModelOption = {
   provider: string;
 };
 
+type SpeechLanguage = "english" | "welsh" | "gaelic";
+
+const speechLanguages: Array<{ code: SpeechLanguage; label: string; recognitionLang: string }> = [
+  { code: "english", label: "English", recognitionLang: "en-GB" },
+  { code: "welsh", label: "Welsh", recognitionLang: "cy-GB" },
+  { code: "gaelic", label: "Gaelic", recognitionLang: "gd-GB" },
+];
+
 type BenchmarkRun = {
   id: string;
   answer: string;
@@ -752,18 +760,21 @@ function collectSpecSpeechFacts(value: unknown, facts: string[] = []) {
     }
   }
 
-  if (/BarChart/i.test(component) && Array.isArray(props.data)) {
+  if (/(BarChart|LineChart|AreaChart|VerticalBarChart|PieChart|ScatterChart|ComposedChart)/i.test(component) && Array.isArray(props.data)) {
     const title = textFromUnknown(props.title);
+    const series = Array.isArray(props.series) ? props.series : [];
+    const primarySeries = typeof series[0] === "object" && series[0] !== null ? textFromUnknown((series[0] as Record<string, unknown>).key) : "";
     const top = props.data
       .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
       .slice(0, 3)
       .map((item) => {
-        const label = textFromUnknown(item.label);
-        const numberValue = typeof item.value === "number" ? item.value.toLocaleString() : textFromUnknown(item.value);
+        const label = textFromUnknown(item.label ?? item[props.xKey as string]);
+        const rawValue = item.value ?? (primarySeries ? item[primarySeries] : undefined) ?? item[props.yKey as string];
+        const numberValue = typeof rawValue === "number" ? rawValue.toLocaleString() : textFromUnknown(rawValue);
         return label && numberValue ? `${label} ${numberValue}` : "";
       })
       .filter(Boolean);
-    if (top.length) facts.push(`${title || "Top values"}: ${top.join("; ")}`);
+    if (top.length) facts.push(`${title || "Chart highlights"}: ${top.join("; ")}`);
   }
 
   if (/DataTable/i.test(component) && Array.isArray(props.rows)) {
@@ -815,6 +826,7 @@ function ChatMessage({
   const canBenchmark = message.role === "assistant" && Boolean(message.benchmarkRun) && !isStreaming;
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [speechLanguage, setSpeechLanguage] = useState<SpeechLanguage>("english");
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const canSpeak = message.role === "assistant" && !isStreaming && message.text.trim().length > 0;
@@ -836,7 +848,7 @@ function ChatMessage({
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
 
       const response = await fetch("/api/speech", {
-        body: JSON.stringify({ text: speechSummaryForMessage(message.text) }),
+        body: JSON.stringify({ language: speechLanguage, text: speechSummaryForMessage(message.text) }),
         headers: { "content-type": "application/json" },
         method: "POST",
       });
@@ -905,16 +917,19 @@ function ChatMessage({
       {canBenchmark || canSpeak ? (
         <div className="message-actions">
           {canSpeak ? (
-            <Button
-              disabled={isSpeaking}
-              icon={isSpeaking ? <Loader size="sm" /> : <Volume2 size={15} />}
-              size="sm"
-              type="button"
-              variant="secondary"
-              onClick={() => void speakMessage()}
-            >
-              {isSpeaking ? "Speaking" : "Speak"}
-            </Button>
+            <div className="message-speech-actions">
+              <SpeechLanguageSelect language={speechLanguage} setLanguage={setSpeechLanguage} />
+              <Button
+                disabled={isSpeaking}
+                icon={isSpeaking ? <Loader size="sm" /> : <Volume2 size={15} />}
+                size="sm"
+                type="button"
+                variant="secondary"
+                onClick={() => void speakMessage()}
+              >
+                {isSpeaking ? "Speaking" : "Speak"}
+              </Button>
+            </div>
           ) : null}
           {canBenchmark ? (
             <Button
@@ -976,7 +991,7 @@ function VoiceInputButton({
     const recognition = new Recognition();
     recognition.continuous = false;
     recognition.interimResults = false;
-    recognition.lang = navigator.language || "en-US";
+    recognition.lang = navigator.language || "en-GB";
     recognition.onresult = (event) => {
       const transcript = Array.from(event.results)
         .flatMap((result) => Array.from(result).map((item) => item.transcript))
@@ -1010,6 +1025,27 @@ function VoiceInputButton({
       />
       {error ? <span>{error}</span> : null}
     </div>
+  );
+}
+
+function SpeechLanguageSelect({
+  language,
+  setLanguage,
+}: {
+  language: SpeechLanguage;
+  setLanguage: (language: SpeechLanguage) => void;
+}) {
+  return (
+    <label className="speech-language-select">
+      <span>Read</span>
+      <select value={language} onChange={(event) => setLanguage(event.target.value as SpeechLanguage)}>
+        {speechLanguages.map((item) => (
+          <option key={item.code} value={item.code}>
+            {item.label}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -4124,6 +4160,7 @@ function AskDataPage() {
           </div>
           <form className="composer" onSubmit={submit}>
             <Input aria-label="Message" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask for data..." />
+            <VoiceInputButton disabled={isRunning} value={input} onTranscript={setInput} />
             <Button aria-label="Send message" className="icon-button" loading={isRunning} shape="square" type="submit" variant="primary" disabled={isRunning || !input.trim()}>
               <Send size={18} />
             </Button>

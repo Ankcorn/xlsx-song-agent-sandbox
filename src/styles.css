@@ -738,6 +738,7 @@
 
   .llm-stat-card,
   .llm-bar-chart,
+  .llm-chart,
   .llm-key-value,
   .llm-data-table {
     @apply my-3 min-w-0 rounded-xl border border-zinc-200 bg-white shadow-sm;
@@ -768,13 +769,36 @@
   }
 
   .llm-bar-chart,
+  .llm-chart,
   .llm-key-value {
     @apply p-5;
   }
 
   .llm-bar-chart h3,
+  .llm-chart h3,
   .llm-key-value h3 {
-    @apply mb-4 text-base font-semibold text-zinc-950;
+    @apply text-base font-semibold text-zinc-950;
+  }
+
+  .llm-chart-header {
+    @apply mb-4 grid gap-1;
+  }
+
+  .llm-chart-header p {
+    @apply text-sm leading-relaxed text-zinc-500;
+  }
+
+  .llm-chart-frame {
+    @apply min-w-0 overflow-hidden rounded-lg border border-zinc-100 bg-zinc-50/40 p-3;
+  }
+
+  .llm-chart .recharts-cartesian-axis-tick-value,
+  .llm-chart .recharts-legend-item-text {
+    @apply fill-zinc-500 text-xs;
+  }
+
+  .llm-chart .recharts-tooltip-wrapper {
+    @apply text-sm;
   }
 
   .llm-bar-list {
@@ -948,6 +972,26 @@
 
   .voice-input-control {
     @apply relative;
+  }
+
+  .speech-language-select {
+    @apply inline-flex min-h-10 shrink-0 items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 text-sm font-medium text-zinc-600 shadow-sm;
+  }
+
+  .message-speech-actions {
+    @apply inline-flex flex-wrap items-center gap-2;
+  }
+
+  .message-speech-actions .speech-language-select {
+    @apply min-h-9 px-2.5 text-sm;
+  }
+
+  .speech-language-select > span {
+    @apply text-xs font-semibold uppercase tracking-wide text-zinc-500;
+  }
+
+  .speech-language-select select {
+    @apply cursor-pointer border-0 bg-transparent text-sm font-semibold text-zinc-950 outline-none;
   }
 
   .voice-input-control > span {
