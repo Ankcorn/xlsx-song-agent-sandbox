@@ -143,10 +143,11 @@ export class AgentThink extends Think<Env> {
     }
     if (url.pathname.endsWith("/song") && request.method === "GET") return json({ song: this.getAgentSong() });
     if (url.pathname.endsWith("/song") && request.method === "POST") {
-      const body = (await request.json().catch(() => ({}))) as { lengthMs?: unknown; prompt?: unknown };
+      const body = (await request.json().catch(() => ({}))) as { language?: unknown; lengthMs?: unknown; prompt?: unknown };
+      const language = typeof body.language === "string" ? body.language.trim() : "";
       const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
       const lengthMs = typeof body.lengthMs === "number" ? body.lengthMs : undefined;
-      return json({ song: await this.generateAgentSong(prompt, lengthMs) });
+      return json({ song: await this.generateAgentSong(prompt, lengthMs, language) });
     }
     if (url.pathname.endsWith("/song/audio") && request.method === "GET") return this.getAgentSongAudio();
     if (url.pathname.endsWith("/agent-table") && request.method === "GET") {
@@ -392,6 +393,7 @@ export class AgentThink extends Think<Env> {
         id TEXT PRIMARY KEY,
         prompt TEXT NOT NULL,
         title TEXT,
+        language TEXT NOT NULL DEFAULT 'English',
         music_prompt TEXT NOT NULL,
         facts_json TEXT NOT NULL,
         audio_r2_key TEXT NOT NULL,
@@ -402,6 +404,13 @@ export class AgentThink extends Think<Env> {
         updated_at TEXT NOT NULL
       )
     `;
+    try {
+      this.ctx.storage.sql.exec("ALTER TABLE agent_songs ADD COLUMN language TEXT NOT NULL DEFAULT 'English'");
+    } catch (error) {
+      if (!(error instanceof Error ? error.message : String(error)).toLowerCase().includes("duplicate column")) {
+        throw error;
+      }
+    }
     try {
       this.ctx.storage.sql.exec("ALTER TABLE agent_table_mappings ADD COLUMN metadata_json TEXT");
     } catch (error) {
@@ -540,6 +549,7 @@ export class AgentThink extends Think<Env> {
       facts_json: string;
       generated_at: string;
       id: string;
+      language: string;
       model_id: string;
       music_prompt: string;
       output_format: string;
@@ -547,7 +557,7 @@ export class AgentThink extends Think<Env> {
       title: string | null;
       updated_at: string;
     }>`
-      SELECT id, prompt, title, music_prompt, facts_json, audio_r2_key, content_type, model_id, output_format, generated_at, updated_at
+      SELECT id, prompt, title, language, music_prompt, facts_json, audio_r2_key, content_type, model_id, output_format, generated_at, updated_at
       FROM agent_songs
       WHERE id = 'current'
       LIMIT 1
@@ -560,6 +570,7 @@ export class AgentThink extends Think<Env> {
       generatedAt: row.generated_at,
       id: row.id,
       isStale: latestDataUpdatedAt ? new Date(latestDataUpdatedAt).getTime() > new Date(row.generated_at).getTime() : false,
+      language: row.language,
       latestDataUpdatedAt,
       modelId: row.model_id,
       musicPrompt: row.music_prompt,
@@ -673,7 +684,7 @@ export class AgentThink extends Think<Env> {
     }
   }
 
-  private async generateAgentSong(prompt: string, lengthMs?: number) {
+  private async generateAgentSong(prompt: string, lengthMs?: number, requestedLanguage?: string) {
     this.ensureAgentSchema();
     if (!this.env.ELEVENLABS_API_KEY) throw new Error("ELEVENLABS_API_KEY is not configured.");
 
@@ -685,9 +696,14 @@ export class AgentThink extends Think<Env> {
     const modelId = this.env.ELEVENLABS_MODEL_ID || "music_v1";
     const outputFormat = this.env.ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128";
     const musicLengthMs = Math.max(10_000, Math.min(120_000, lengthMs ?? 45_000));
+    const language = requestedLanguage && requestedLanguage !== "Custom / prompt decides" ? requestedLanguage : "Custom / prompt decides";
+    const languageInstruction =
+      language === "Custom / prompt decides"
+        ? "Use the language requested in the user's custom prompt. If no language is requested, use English."
+        : `Generate the song primarily in ${language}. Keep proper nouns, dataset names, and key numeric facts accurate.`;
 
     this.recordTrace({
-      detail: { lengthMs: musicLengthMs, prompt: finalPrompt },
+      detail: { language, lengthMs: musicLengthMs, prompt: finalPrompt },
       requestId,
       spanType: "song",
       status: "running",
@@ -704,6 +720,7 @@ export class AgentThink extends Think<Env> {
           "Use the SQL-like agent database snapshot below to extract concrete facts and write a compact ElevenLabs music prompt.",
           "Return ONLY JSON with this shape: {\"title\":\"...\",\"facts\":[\"...\"],\"musicPrompt\":\"...\"}.",
           "The musicPrompt should include genre, mood, structure, vocal style, and lyrics or lyric guidance. Keep it under 3000 characters.",
+          languageInstruction,
           "Use real facts from the snapshot; do not invent statistics.",
           "",
           JSON.stringify(snapshot),
@@ -743,17 +760,19 @@ export class AgentThink extends Think<Env> {
         httpMetadata: { contentType },
         customMetadata: {
           agentName: this.name,
+          language,
           modelId,
           title: brief.title,
         },
       });
 
       this.sql`
-        INSERT INTO agent_songs (id, prompt, title, music_prompt, facts_json, audio_r2_key, content_type, model_id, output_format, generated_at, updated_at)
-        VALUES ('current', ${finalPrompt}, ${brief.title}, ${brief.musicPrompt}, ${JSON.stringify(brief.facts)}, ${audioR2Key}, ${contentType}, ${modelId}, ${outputFormat}, ${now}, ${now})
+        INSERT INTO agent_songs (id, prompt, title, language, music_prompt, facts_json, audio_r2_key, content_type, model_id, output_format, generated_at, updated_at)
+        VALUES ('current', ${finalPrompt}, ${brief.title}, ${language}, ${brief.musicPrompt}, ${JSON.stringify(brief.facts)}, ${audioR2Key}, ${contentType}, ${modelId}, ${outputFormat}, ${now}, ${now})
         ON CONFLICT(id) DO UPDATE SET
           prompt = excluded.prompt,
           title = excluded.title,
+          language = excluded.language,
           music_prompt = excluded.music_prompt,
           facts_json = excluded.facts_json,
           audio_r2_key = excluded.audio_r2_key,

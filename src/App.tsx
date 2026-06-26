@@ -129,6 +129,7 @@ type AgentSong = {
   generatedAt: string;
   id: string;
   isStale?: boolean;
+  language: string;
   latestDataUpdatedAt?: string | null;
   modelId: string;
   musicPrompt: string;
@@ -3737,6 +3738,7 @@ function AgentSongView({ agentId, mode }: { agentId: string; mode: "edit" | "pub
   const [agentRecord, setAgentRecord] = useState<LibraryAgent | null>(null);
   const [song, setSong] = useState<AgentSong | null>(null);
   const [prompt, setPrompt] = useState("");
+  const [language, setLanguage] = useState("English");
   const [lengthSeconds, setLengthSeconds] = useState(45);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -3754,6 +3756,7 @@ function AgentSongView({ agentId, mode }: { agentId: string; mode: "edit" | "pub
         setAgentRecord(agentData.agent);
         setSong(songData.song);
         setPrompt(songData.song?.prompt ?? "");
+        setLanguage(songData.song?.language ?? "English");
         setError(null);
       } catch (caught) {
         if (isMounted) setError(caught instanceof Error ? caught.message : "Could not load song");
@@ -3774,7 +3777,7 @@ function AgentSongView({ agentId, mode }: { agentId: string; mode: "edit" | "pub
     setError(null);
     try {
       const data = await fetchJson<AgentSongResponse>(`/api/agents/${agentId}/song`, {
-        body: JSON.stringify({ lengthMs: lengthSeconds * 1000, prompt }),
+        body: JSON.stringify({ language, lengthMs: lengthSeconds * 1000, prompt }),
         headers: { "content-type": "application/json" },
         method: "POST",
       });
@@ -3859,6 +3862,18 @@ function AgentSongView({ agentId, mode }: { agentId: string; mode: "edit" | "pub
               onChange={(event) => setLengthSeconds(Math.max(10, Math.min(120, Number(event.target.value) || 45)))}
             />
           </label>
+          <label className="form-field song-language-field">
+            <span>Language</span>
+            <select value={language} onChange={(event) => setLanguage(event.target.value)}>
+              <option>English</option>
+              <option>Welsh</option>
+              <option>Scottish Gaelic</option>
+              <option>Irish</option>
+              <option>Cornish</option>
+              <option>Manx</option>
+              <option>Custom / prompt decides</option>
+            </select>
+          </label>
           <Button disabled={isGenerating} loading={isGenerating} type="submit" variant="secondary">
             Regenerate with prompt
           </Button>
@@ -3880,7 +3895,7 @@ function AgentSongView({ agentId, mode }: { agentId: string; mode: "edit" | "pub
             <div>
               <p className="eyebrow">Generated audio</p>
               <h2>{song.title || "Agent song"}</h2>
-              <p className="muted">{song.modelId} · {song.outputFormat}</p>
+              <p className="muted">{song.language} · {song.modelId} · {song.outputFormat}</p>
             </div>
             <audio controls src={audioUrl} />
             {isPublic ? (
