@@ -2125,16 +2125,58 @@ async function retrySpreadsheetExtraction(env: Env, spreadsheetId: string) {
 async function downloadSpreadsheetFile(env: Env, spreadsheetId: string) {
   const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
   if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
-  if (!spreadsheet.r2_key) return json({ error: "Spreadsheet file is not available in R2." }, { status: 409 });
 
-  const object = await env.SPREADSHEETS.get(spreadsheet.r2_key);
-  if (!object) return json({ error: "Spreadsheet file was not found in R2." }, { status: 404 });
+  const candidates: Array<{
+    contentType: string;
+    filename: string;
+    r2Key: string | null;
+  }> = [
+    {
+      contentType: spreadsheet.content_type,
+      filename: spreadsheet.filename,
+      r2Key: spreadsheet.r2_key,
+    },
+  ];
 
-  const headers = new Headers();
-  headers.set("Content-Type", spreadsheet.content_type || object.httpMetadata?.contentType || "application/octet-stream");
-  headers.set("Content-Length", String(object.size));
-  headers.set("Content-Disposition", contentDispositionFilename(spreadsheet.filename));
-  return new Response(object.body, { headers });
+  const latestRevision = (
+    await env.DB.prepare(
+      [
+        "SELECT filename, content_type, r2_key",
+        "FROM spreadsheet_revisions",
+        "WHERE spreadsheet_id = ?",
+        "ORDER BY revision_number DESC",
+        "LIMIT 1",
+      ].join(" "),
+    )
+      .bind(spreadsheet.id)
+      .first<{ content_type: string; filename: string; r2_key: string }>()
+  ) ?? null;
+
+  if (latestRevision) {
+    candidates.push({
+      contentType: latestRevision.content_type,
+      filename: latestRevision.filename,
+      r2Key: latestRevision.r2_key,
+    });
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate.r2Key) continue;
+    const object = await env.SPREADSHEETS.get(candidate.r2Key);
+    if (!object) continue;
+
+    const headers = new Headers();
+    headers.set("Content-Type", candidate.contentType || object.httpMetadata?.contentType || "application/octet-stream");
+    headers.set("Content-Length", String(object.size));
+    headers.set("Content-Disposition", contentDispositionFilename(candidate.filename));
+    return new Response(object.body, { headers });
+  }
+
+  const stub = env.SheetsThink.get(env.SheetsThink.idFromName(spreadsheet.agent_name));
+  const agentResponse = await stub.fetch("https://agent.local/raw-file");
+  if (agentResponse.ok) return agentResponse;
+
+  return json({ error: "Spreadsheet file was not found in R2 or the sheet agent." }, { status: 404 });
 }
 
 async function deleteSpreadsheet(env: Env, spreadsheetId: string) {

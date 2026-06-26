@@ -1374,6 +1374,12 @@ export class SheetsThink extends Think<Env> {
       return json(await this.getRawSpreadsheetPreview(spreadsheetId));
     }
 
+    if (url.pathname.endsWith("/raw-file") && request.method === "GET") {
+      const spreadsheetId = spreadsheetIdFromAgentName(this.name);
+      if (!spreadsheetId) return json({ error: "This agent is not attached to a spreadsheet." }, { status: 400 });
+      return this.getRawSpreadsheetFile(spreadsheetId);
+    }
+
     if (url.pathname.endsWith("/api-request") && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as AgentRequestPayload;
       if (typeof body.message !== "string" || !body.message.trim()) {
@@ -2843,6 +2849,46 @@ export class SheetsThink extends Think<Env> {
     } finally {
       await sandbox.destroy().catch(() => undefined);
     }
+  }
+
+  private async getRawSpreadsheetFile(spreadsheetId: string) {
+    this.ensureFileSchema();
+    const file = this.sql<{
+      content_type: string;
+      file_base64: string | null;
+      filename: string;
+      r2_key: string | null;
+      size_bytes: number;
+    }>`
+      SELECT filename, content_type, size_bytes, r2_key, file_base64
+      FROM agent_spreadsheet_files
+      WHERE spreadsheet_id = ${spreadsheetId}
+      LIMIT 1
+    `[0];
+
+    if (!file) return json({ error: "Raw spreadsheet file metadata was not found." }, { status: 404 });
+
+    const headers = new Headers();
+    headers.set("Content-Type", file.content_type || "application/octet-stream");
+    headers.set("Content-Disposition", `attachment; filename="${safeFilename(file.filename)}"; filename*=UTF-8''${encodeURIComponent(file.filename)}`);
+
+    if (file.r2_key) {
+      const object = await this.env.SPREADSHEETS.get(file.r2_key);
+      if (object) {
+        headers.set("Content-Type", file.content_type || object.httpMetadata?.contentType || "application/octet-stream");
+        headers.set("Content-Length", String(object.size));
+        return new Response(object.body, { headers });
+      }
+    }
+
+    if (file.file_base64) {
+      const binary = atob(file.file_base64);
+      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      headers.set("Content-Length", String(bytes.byteLength));
+      return new Response(bytes, { headers });
+    }
+
+    return json({ error: "Raw spreadsheet file was not found." }, { status: 404 });
   }
 
   private safeSqlIdentifier(value: string) {
