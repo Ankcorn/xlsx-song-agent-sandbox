@@ -150,6 +150,7 @@ export class AgentThink extends Think<Env> {
       return json({ song: await this.generateAgentSong(prompt, lengthMs, language) });
     }
     if (url.pathname.endsWith("/song/audio") && request.method === "GET") return this.getAgentSongAudio();
+    if (url.pathname.endsWith("/song/cover") && request.method === "GET") return this.getAgentSongCover();
     if (url.pathname.endsWith("/agent-table") && request.method === "GET") {
       const tableName = url.searchParams.get("table");
       if (!tableName) return json({ error: "Missing table query parameter." }, { status: 400 });
@@ -397,6 +398,9 @@ export class AgentThink extends Think<Env> {
         music_prompt TEXT NOT NULL,
         facts_json TEXT NOT NULL,
         audio_r2_key TEXT NOT NULL,
+        cover_image_r2_key TEXT,
+        cover_image_content_type TEXT,
+        cover_prompt TEXT,
         content_type TEXT NOT NULL,
         model_id TEXT NOT NULL,
         output_format TEXT NOT NULL,
@@ -409,6 +413,15 @@ export class AgentThink extends Think<Env> {
     } catch (error) {
       if (!(error instanceof Error ? error.message : String(error)).toLowerCase().includes("duplicate column")) {
         throw error;
+      }
+    }
+    for (const column of ["cover_image_r2_key TEXT", "cover_image_content_type TEXT", "cover_prompt TEXT"]) {
+      try {
+        this.ctx.storage.sql.exec(`ALTER TABLE agent_songs ADD COLUMN ${column}`);
+      } catch (error) {
+        if (!(error instanceof Error ? error.message : String(error)).toLowerCase().includes("duplicate column")) {
+          throw error;
+        }
       }
     }
     try {
@@ -546,6 +559,9 @@ export class AgentThink extends Think<Env> {
     const row = this.sql<{
       audio_r2_key: string;
       content_type: string;
+      cover_image_content_type: string | null;
+      cover_image_r2_key: string | null;
+      cover_prompt: string | null;
       facts_json: string;
       generated_at: string;
       id: string;
@@ -557,7 +573,7 @@ export class AgentThink extends Think<Env> {
       title: string | null;
       updated_at: string;
     }>`
-      SELECT id, prompt, title, language, music_prompt, facts_json, audio_r2_key, content_type, model_id, output_format, generated_at, updated_at
+      SELECT id, prompt, title, language, music_prompt, facts_json, audio_r2_key, cover_image_r2_key, cover_image_content_type, cover_prompt, content_type, model_id, output_format, generated_at, updated_at
       FROM agent_songs
       WHERE id = 'current'
       LIMIT 1
@@ -566,6 +582,8 @@ export class AgentThink extends Think<Env> {
     const latestDataUpdatedAt = this.latestAgentDataUpdatedAt();
     return {
       audioUrl: `/api/agents/${this.agentIdFromName()}/song/audio`,
+      coverArtUrl: row.cover_image_r2_key ? `/api/agents/${this.agentIdFromName()}/song/cover` : null,
+      coverPrompt: row.cover_prompt,
       facts: this.parseStringList(row.facts_json),
       generatedAt: row.generated_at,
       id: row.id,
@@ -596,6 +614,25 @@ export class AgentThink extends Think<Env> {
     headers.set("Content-Type", row.content_type || object.httpMetadata?.contentType || "audio/mpeg");
     headers.set("Content-Length", String(object.size));
     headers.set("Content-Disposition", `inline; filename="${this.safeSongFilename(row.title)}.mp3"`);
+    return new Response(object.body, { headers });
+  }
+
+  private async getAgentSongCover() {
+    this.ensureAgentSchema();
+    const row = this.sql<{ cover_image_content_type: string | null; cover_image_r2_key: string | null; title: string | null }>`
+      SELECT cover_image_r2_key, cover_image_content_type, title
+      FROM agent_songs
+      WHERE id = 'current'
+      LIMIT 1
+    `[0];
+    if (!row?.cover_image_r2_key) return json({ error: "No song cover generated yet." }, { status: 404 });
+    const object = await this.env.SPREADSHEETS.get(row.cover_image_r2_key);
+    if (!object) return json({ error: "Generated song cover was not found." }, { status: 404 });
+    const headers = new Headers();
+    headers.set("Content-Type", row.cover_image_content_type || object.httpMetadata?.contentType || "image/jpeg");
+    headers.set("Content-Length", String(object.size));
+    headers.set("Content-Disposition", `inline; filename="${this.safeSongFilename(row.title)}-cover.jpg"`);
+    headers.set("Cache-Control", "public, max-age=31536000, immutable");
     return new Response(object.body, { headers });
   }
 
@@ -735,7 +772,18 @@ export class AgentThink extends Think<Env> {
       const brief = this.parseSongBrief(generatedTextFromResult(briefResult), finalPrompt);
       const musicUrl = new URL("https://api.elevenlabs.io/v1/music/stream");
       musicUrl.searchParams.set("output_format", outputFormat);
-      const musicResponse = await fetch(musicUrl, {
+      const coverPrompt = this.songCoverPrompt(brief, language);
+      const coverPromise = this.generateSongCoverArt(coverPrompt, requestId).catch((error) => {
+        this.recordTrace({
+          detail: error instanceof Error ? error.message : String(error),
+          requestId,
+          spanType: "song",
+          status: "error",
+          title: "Song cover generation failed",
+        });
+        return null;
+      });
+      const musicPromise = fetch(musicUrl, {
         body: JSON.stringify({
           model_id: modelId,
           music_length_ms: musicLengthMs,
@@ -747,6 +795,7 @@ export class AgentThink extends Think<Env> {
         },
         method: "POST",
       });
+      const [musicResponse, cover] = await Promise.all([musicPromise, coverPromise]);
 
       if (!musicResponse.ok) {
         throw new Error((await musicResponse.text().catch(() => "")) || `ElevenLabs music request failed (${musicResponse.status}).`);
@@ -767,8 +816,8 @@ export class AgentThink extends Think<Env> {
       });
 
       this.sql`
-        INSERT INTO agent_songs (id, prompt, title, language, music_prompt, facts_json, audio_r2_key, content_type, model_id, output_format, generated_at, updated_at)
-        VALUES ('current', ${finalPrompt}, ${brief.title}, ${language}, ${brief.musicPrompt}, ${JSON.stringify(brief.facts)}, ${audioR2Key}, ${contentType}, ${modelId}, ${outputFormat}, ${now}, ${now})
+        INSERT INTO agent_songs (id, prompt, title, language, music_prompt, facts_json, audio_r2_key, cover_image_r2_key, cover_image_content_type, cover_prompt, content_type, model_id, output_format, generated_at, updated_at)
+        VALUES ('current', ${finalPrompt}, ${brief.title}, ${language}, ${brief.musicPrompt}, ${JSON.stringify(brief.facts)}, ${audioR2Key}, ${cover?.r2Key ?? null}, ${cover?.contentType ?? null}, ${coverPrompt}, ${contentType}, ${modelId}, ${outputFormat}, ${now}, ${now})
         ON CONFLICT(id) DO UPDATE SET
           prompt = excluded.prompt,
           title = excluded.title,
@@ -776,6 +825,9 @@ export class AgentThink extends Think<Env> {
           music_prompt = excluded.music_prompt,
           facts_json = excluded.facts_json,
           audio_r2_key = excluded.audio_r2_key,
+          cover_image_r2_key = excluded.cover_image_r2_key,
+          cover_image_content_type = excluded.cover_image_content_type,
+          cover_prompt = excluded.cover_prompt,
           content_type = excluded.content_type,
           model_id = excluded.model_id,
           output_format = excluded.output_format,
@@ -784,7 +836,7 @@ export class AgentThink extends Think<Env> {
       `;
 
       this.recordTrace({
-        detail: { byteLength: audio.byteLength, facts: brief.facts, title: brief.title, usage: briefResult.usage },
+        detail: { byteLength: audio.byteLength, coverArt: Boolean(cover), facts: brief.facts, title: brief.title, usage: briefResult.usage },
         durationMs: Date.now() - startedAt,
         requestId,
         spanType: "song",
@@ -831,6 +883,74 @@ export class AgentThink extends Think<Env> {
         ? record.musicPrompt.trim().slice(0, 4000)
         : `${fallbackPrompt}\n\nWrite a concise song using the agent's data facts.`;
     return { facts, musicPrompt, title };
+  }
+
+  private songCoverPrompt(brief: { facts: string[]; musicPrompt: string; title: string }, language: string) {
+    const facts = brief.facts.slice(0, 4).join("; ");
+    return [
+      `Square album cover art for a data song titled "${brief.title}".`,
+      "Clean modern editorial illustration, neutral shadcn-inspired palette with one vivid accent, crisp composition, no UI chrome, no readable text, no logos.",
+      "Visual metaphor: spreadsheets, charts, flowing music waves, and open-data patterns blending into a polished record sleeve.",
+      facts ? `Data cues to inspire the imagery: ${facts}.` : "",
+      language && language !== "Custom / prompt decides" ? `Subtle cultural/language mood: ${language}.` : "",
+      `Song mood brief: ${brief.musicPrompt.slice(0, 800)}`,
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  private async generateSongCoverArt(prompt: string, requestId: string) {
+    const startedAt = Date.now();
+    this.recordTrace({
+      detail: { model: "@cf/black-forest-labs/flux-2-klein-9b", prompt },
+      requestId,
+      spanType: "song",
+      status: "running",
+      title: "Generating song cover art",
+    });
+    const form = new FormData();
+    form.append("prompt", prompt);
+    form.append("width", "1024");
+    form.append("height", "1024");
+    const formResponse = new Response(form);
+    const formStream = formResponse.body;
+    const formContentType = formResponse.headers.get("content-type");
+    if (!formStream || !formContentType) throw new Error("Could not serialize cover art multipart request.");
+
+    const response = await (this.env.AI as unknown as { run: (model: string, input: unknown) => Promise<{ image?: string }> }).run("@cf/black-forest-labs/flux-2-klein-9b", {
+      multipart: {
+        body: formStream,
+        contentType: formContentType,
+      },
+    });
+    if (!response.image) throw new Error("Flux did not return image data.");
+
+    const bytes = this.base64ToUint8Array(response.image);
+    const contentType = "image/jpeg";
+    const r2Key = `agent-songs/${this.name}/cover-${Date.now()}.jpg`;
+    await this.env.SPREADSHEETS.put(r2Key, bytes, {
+      httpMetadata: { contentType },
+      customMetadata: {
+        agentName: this.name,
+        modelId: "@cf/black-forest-labs/flux-2-klein-9b",
+      },
+    });
+    this.recordTrace({
+      detail: { byteLength: bytes.byteLength, model: "@cf/black-forest-labs/flux-2-klein-9b", r2Key },
+      durationMs: Date.now() - startedAt,
+      requestId,
+      spanType: "song",
+      status: "done",
+      title: "Song cover art generated",
+    });
+    return { contentType, r2Key };
+  }
+
+  private base64ToUint8Array(value: string) {
+    const binary = atob(value.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, ""));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
   }
 
   private parseStringList(text: string | null) {

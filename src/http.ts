@@ -2636,6 +2636,14 @@ export default {
       return stub.fetch("https://agent.local/song/audio");
     }
 
+    const agentSongCoverMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/song\/cover$/);
+    if (agentSongCoverMatch && request.method === "GET") {
+      const agent = await getLibraryAgentRow(env, agentSongCoverMatch[1]);
+      if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+      const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
+      return stub.fetch("https://agent.local/song/cover");
+    }
+
     const agentTablesMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/tables$/);
     if (agentTablesMatch && request.method === "GET") {
       const agent = await getLibraryAgentRow(env, agentTablesMatch[1]);

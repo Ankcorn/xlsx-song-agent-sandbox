@@ -125,6 +125,8 @@ type AgentReportResponse = {
 
 type AgentSong = {
   audioUrl: string;
+  coverArtUrl?: string | null;
+  coverPrompt?: string | null;
   facts: string[];
   generatedAt: string;
   id: string;
@@ -3917,6 +3919,7 @@ function AgentSongView({ agentId, mode }: { agentId: string; mode: "edit" | "pub
 
   const isPublic = mode === "public";
   const audioUrl = song ? `${song.audioUrl}?v=${encodeURIComponent(song.updatedAt)}` : "";
+  const coverArtUrl = song?.coverArtUrl ? `${song.coverArtUrl}?v=${encodeURIComponent(song.updatedAt)}` : "";
 
   return (
     <section className={isPublic ? "report-public-page song-public-page" : "content-band report-page song-page"}>
@@ -4014,9 +4017,13 @@ function AgentSongView({ agentId, mode }: { agentId: string; mode: "edit" | "pub
       ) : song ? (
         <article className="song-artifact">
           <section className="song-player-panel">
-            <div className="song-icon">
-              <Music size={32} />
-            </div>
+            {coverArtUrl ? (
+              <img className="song-cover-art" src={coverArtUrl} alt="" />
+            ) : (
+              <div className="song-icon">
+                <Music size={32} />
+              </div>
+            )}
             <div>
               <p className="eyebrow">Generated audio</p>
               <h2>{song.title || "Agent song"}</h2>
@@ -4046,6 +4053,12 @@ function AgentSongView({ agentId, mode }: { agentId: string; mode: "edit" | "pub
               <p className="eyebrow">Music prompt</p>
               <pre>{song.musicPrompt}</pre>
             </article>
+            {song.coverPrompt ? (
+              <article>
+                <p className="eyebrow">Cover art prompt</p>
+                <pre>{song.coverPrompt}</pre>
+              </article>
+            ) : null}
           </section>
         </article>
       ) : (
