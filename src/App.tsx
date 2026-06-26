@@ -347,6 +347,16 @@ type BenchmarkRun = {
   outputTokens: number | null;
 };
 
+type BenchmarkModelAggregate = {
+  averageCostUsd: number | null;
+  averageQuality: number | null;
+  averageSeconds: number | null;
+  averageTokens: number | null;
+  key: string;
+  label: string;
+  runs: number;
+};
+
 type BenchmarkRunsResponse = {
   runs: BenchmarkRun[];
 };
@@ -1067,6 +1077,35 @@ function aiModelLabel(model: AiModelOption | null | undefined) {
 function benchmarkAccessMode(run: BenchmarkRun) {
   const accessMode = run.evidence?.accessMode;
   return typeof accessMode === "string" && accessMode ? accessMode : "auto";
+}
+
+function benchmarkModelFamily(run: BenchmarkRun) {
+  const provider = (run.modelProvider ?? "").toLowerCase();
+  const model = (run.modelName ?? "").toLowerCase();
+  if (provider.includes("openai") || model.includes("gpt")) return "chatgpt";
+  if (provider.includes("anthropic") || model.includes("claude")) return "claude";
+  if (provider.includes("workers-ai") || model.includes("kimi") || model.includes("moonshot")) return "kimi";
+  return "other";
+}
+
+function benchmarkModelAggregates(runs: BenchmarkRun[]): BenchmarkModelAggregate[] {
+  const groups = [
+    { key: "chatgpt", label: "ChatGPT" },
+    { key: "claude", label: "Claude" },
+    { key: "kimi", label: "Kimi" },
+  ];
+
+  return groups.map((group) => {
+    const groupRuns = runs.filter((run) => benchmarkModelFamily(run) === group.key);
+    return {
+      ...group,
+      averageCostUsd: average(groupRuns.map((run) => run.evidence?.estimatedCostUsd)),
+      averageQuality: average(groupRuns.map((run) => run.quality)),
+      averageSeconds: average(groupRuns.map((run) => run.answerSeconds)),
+      averageTokens: average(groupRuns.map((run) => run.totalTokens)),
+      runs: groupRuns.length,
+    };
+  });
 }
 
 function formatCurrency(value: number | null | undefined) {
@@ -3675,7 +3714,8 @@ function AgentReportView({ agentId, mode }: { agentId: string; mode: "edit" | "p
     }
   }
 
-  const reportSpec = isJsonRenderSpec(report?.spec) ? report.spec : null;
+  const rawReportSpec = report?.spec;
+  const reportSpec = isJsonRenderSpec(rawReportSpec) ? rawReportSpec : null;
   const isPublic = mode === "public";
 
   return (
@@ -4221,6 +4261,7 @@ function BenchmarkDashboardPage() {
   const averageAnswerSeconds = average(completedRuns.map((run) => run.answerSeconds));
   const averageTotalTokens = average(completedRuns.map((run) => run.totalTokens));
   const averageQuality = average(completedRuns.map((run) => run.quality));
+  const modelAggregates = benchmarkModelAggregates(completedRuns);
 
   async function setQuality(runId: string, quality: number) {
     setRuns((current) => current.map((run) => (run.id === runId ? { ...run, quality } : run)));
@@ -4292,6 +4333,8 @@ function BenchmarkDashboardPage() {
           <MetricCard icon={<BarChart3 size={18} />} label="Avg tokens" value={formatNumber(averageTotalTokens === null ? null : Math.round(averageTotalTokens))} />
           <MetricCard icon={<Star size={18} />} label="Avg quality" value={averageQuality === null ? "n/a" : `${averageQuality.toFixed(1)}/5`} />
         </section>
+
+        <ModelAggregateGrid aggregates={modelAggregates} />
 
         {error ? <Banner variant="error" title="Benchmark log error" description={error} /> : null}
         {isLoading ? <div className="status-line"><Loader size="sm" /><span>Loading benchmark runs</span></div> : null}
@@ -4368,6 +4411,42 @@ function MetricCard({ icon, label, value }: { icon: ReactNode; label: string; va
       <span>{label}</span>
       <strong>{value}</strong>
     </article>
+  );
+}
+
+function ModelAggregateGrid({ aggregates }: { aggregates: BenchmarkModelAggregate[] }) {
+  return (
+    <section className="model-aggregate-grid">
+      {aggregates.map((aggregate) => (
+        <article className="model-aggregate-card" key={aggregate.key}>
+          <header>
+            <div>
+              <p className="eyebrow">{aggregate.runs} completed {aggregate.runs === 1 ? "run" : "runs"}</p>
+              <h2>{aggregate.label}</h2>
+            </div>
+            <Bot size={18} />
+          </header>
+          <dl>
+            <div>
+              <dt>Avg speed</dt>
+              <dd>{formatSeconds(aggregate.averageSeconds)}</dd>
+            </div>
+            <div>
+              <dt>Avg tokens</dt>
+              <dd>{formatNumber(aggregate.averageTokens === null ? null : Math.round(aggregate.averageTokens))}</dd>
+            </div>
+            <div>
+              <dt>Avg cost</dt>
+              <dd>{formatCurrency(aggregate.averageCostUsd)}</dd>
+            </div>
+            <div>
+              <dt>Avg quality</dt>
+              <dd>{aggregate.averageQuality === null ? "n/a" : `${aggregate.averageQuality.toFixed(1)}/5`}</dd>
+            </div>
+          </dl>
+        </article>
+      ))}
+    </section>
   );
 }
 
