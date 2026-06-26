@@ -1,5 +1,4 @@
 import { useAgent } from "agents/react";
-import { useAgentChat } from "@cloudflare/ai-chat/react";
 import type { Spec } from "@json-render/core";
 import { Badge, Banner, Button, Empty, Input, Loader, Table, Tabs } from "./components/ui";
 import {
@@ -18,7 +17,6 @@ import {
   BarChart3,
   Clock,
   Database,
-  ChevronDown,
   Download,
   FileSpreadsheet,
   FileText,
@@ -30,7 +28,6 @@ import {
   Plus,
   Send,
   Search,
-  Sparkles,
   Star,
   Table2,
   Trash2,
@@ -194,7 +191,38 @@ type AgentRequestResponse = {
     reason?: string;
     score?: number | null;
   };
+  selection?: BenchmarkSelectionEvidence;
   usage?: Record<string, unknown>;
+};
+
+type BenchmarkSelectionCandidate = {
+  columns?: string[];
+  description?: string | null;
+  filename: string;
+  id: string;
+  rowCount?: number;
+  status?: string;
+  tables?: Array<{
+    columns?: string[];
+    name: string;
+    rowCount?: number;
+    sourceName?: string;
+  }>;
+  updatedAt?: string;
+};
+
+type BenchmarkSelectionEvidence = {
+  candidates?: BenchmarkSelectionCandidate[];
+  durationMs?: number;
+  model?: {
+    fallbackModels?: Array<{ model: string; provider: string }>;
+    gatewayId?: string;
+    model?: string;
+    provider?: string;
+  };
+  reason?: string;
+  score?: number | null;
+  usage?: Record<string, unknown> | null;
 };
 
 type AiModelOption = {
@@ -202,17 +230,12 @@ type AiModelOption = {
   provider: string;
 };
 
-type AiModelsResponse = {
-  defaultModel: AiModelOption | null;
-  gatewayId: string;
-  models: AiModelOption[];
-};
-
 type BenchmarkRun = {
   id: string;
   answer: string;
   answerSeconds: number;
   error?: string;
+  evidence?: BenchmarkSelectionEvidence | null;
   finishReason?: string;
   inputTokens: number | null;
   modelName: string | null;
@@ -227,6 +250,14 @@ type BenchmarkRun = {
   totalTokens: number | null;
   uploadSeconds: number | null;
   outputTokens: number | null;
+};
+
+type BenchmarkRunsResponse = {
+  runs: BenchmarkRun[];
+};
+
+type BenchmarkRunResponse = {
+  run: BenchmarkRun | null;
 };
 
 type LibraryGroupMode = "category" | "status" | "extraction" | "type";
@@ -484,10 +515,6 @@ function formatNumber(value: number | null | undefined) {
   return value === null || value === undefined ? "n/a" : value.toLocaleString();
 }
 
-function aiModelKey(model: AiModelOption) {
-  return `${model.provider}:${model.model}`;
-}
-
 function aiModelLabel(model: AiModelOption | null | undefined) {
   if (!model) return "Loading models";
   return `${model.provider} · ${model.model}`;
@@ -513,6 +540,76 @@ function tokenCount(usage: Record<string, unknown> | undefined, keys: string[]) 
     if (typeof value === "number" && Number.isFinite(value)) return Math.round(value);
   }
   return null;
+}
+
+function createBenchmarkRunFromAnswer(input: {
+  answer: AgentRequestResponse;
+  answerSeconds: number;
+  prompt: string;
+  spreadsheetFilename: string | null;
+  spreadsheetId: string;
+  totalSeconds: number;
+  uploadSeconds: number | null;
+}) {
+  const inputTokens = tokenCount(input.answer.usage, ["inputTokens", "promptTokens", "prompt_tokens", "input_tokens"]);
+  const outputTokens = tokenCount(input.answer.usage, ["outputTokens", "completionTokens", "completion_tokens", "output_tokens"]);
+  const reportedTotalTokens = tokenCount(input.answer.usage, ["totalTokens", "total_tokens"]);
+  const totalTokens = reportedTotalTokens ?? (inputTokens !== null && outputTokens !== null ? inputTokens + outputTokens : null);
+
+  return {
+    id: crypto.randomUUID(),
+    answer: input.answer.response,
+    answerSeconds: input.answerSeconds,
+    evidence:
+      input.answer.selection ??
+      {
+        candidates: input.spreadsheetId
+          ? [
+              {
+                filename: input.spreadsheetFilename ?? input.spreadsheetId,
+                id: input.spreadsheetId,
+              },
+            ]
+          : [],
+        model: input.answer.model,
+        reason: input.answer.selectedSpreadsheet?.reason ?? "Spreadsheet chat request used the current spreadsheet, so semantic spreadsheet selection was skipped.",
+        score: input.answer.selectedSpreadsheet?.score ?? null,
+        usage: input.answer.usage,
+      },
+    finishReason: input.answer.finishReason,
+    inputTokens,
+    modelName: input.answer.model?.model ?? null,
+    modelProvider: input.answer.model?.provider ?? null,
+    outputTokens,
+    prompt: input.prompt,
+    quality: null,
+    requestId: input.answer.requestId,
+    spreadsheetFilename: input.answer.selectedSpreadsheet?.filename ?? input.spreadsheetFilename,
+    spreadsheetId: input.answer.selectedSpreadsheet?.id ?? input.spreadsheetId,
+    timestamp: new Date().toISOString(),
+    totalSeconds: input.totalSeconds,
+    totalTokens,
+    uploadSeconds: input.uploadSeconds,
+  } satisfies BenchmarkRun;
+}
+
+async function saveBenchmarkRun(run: BenchmarkRun) {
+  const data = await fetchJson<BenchmarkRunResponse>("/api/benchmarks/runs", {
+    body: JSON.stringify(run),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
+  window.dispatchEvent(new CustomEvent("benchmark-runs-updated"));
+  return data.run ?? run;
+}
+
+async function updateBenchmarkRunQuality(runId: string, quality: number) {
+  await fetchJson<{ ok: true }>(`/api/benchmarks/runs/${runId}`, {
+    body: JSON.stringify({ quality }),
+    headers: { "content-type": "application/json" },
+    method: "PATCH",
+  });
+  window.dispatchEvent(new CustomEvent("benchmark-runs-updated"));
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -1249,8 +1346,8 @@ function ChatSurface({
       }
     },
   });
-  const { clearHistory, messages, sendMessage, status } = useAgentChat({ agent });
-  const isBusy = status === "submitted" || status === "streaming";
+  const [isSending, setIsSending] = useState(false);
+  const isBusy = isSending;
   const [isTraceCollapsed, setIsTraceCollapsed] = useState(false);
   const [activeView, setActiveView] = useState<AgentView>("chat");
   const [analysisTables, setAnalysisTables] = useState<AnalysisTablesResponse | null>(null);
@@ -1264,26 +1361,8 @@ function ChatSurface({
   const [isRetryingExtraction, setIsRetryingExtraction] = useState(false);
   const [isUploadingRevision, setIsUploadingRevision] = useState(false);
   const [renderedMessages, setRenderedMessages] = useState<RenderedMessage[]>([]);
-
-  useEffect(() => {
-    setRenderedMessages((current) => {
-      const previousById = new Map(current.map((message) => [message.id, message]));
-      const next = messages
-        .map((message) => {
-          const text = textFromMessage(message).trim();
-          const previous = previousById.get(message.id);
-          return {
-            id: message.id,
-            role: message.role,
-            text: text || previous?.text || "",
-          };
-        })
-        .filter((message) => message.text.length > 0);
-
-      if (next.length === 0 && current.length > 0 && messages.length > 0) return current;
-      return next;
-    });
-  }, [messages]);
+  const [latestChatRun, setLatestChatRun] = useState<BenchmarkRun | null>(null);
+  const [showEvidence, setShowEvidence] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -1397,18 +1476,70 @@ function ChatSurface({
     };
   }, [activeView, revisions, setSpreadsheet, spreadsheet.id]);
 
-  function submitMessage(event: FormEvent<HTMLFormElement>) {
+  async function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = input.trim();
     if (!text || isBusy) return;
-    sendMessage({ text });
+
+    const totalStarted = performance.now();
+    const userMessage: RenderedMessage = { id: crypto.randomUUID(), role: "user", text };
+    setRenderedMessages((current) => [...current, userMessage]);
     setInput("");
+    setIsSending(true);
+    setShowEvidence(false);
+
+    try {
+      const answerStarted = performance.now();
+      const answer = await fetchJson<AgentRequestResponse>(`/api/spreadsheets/${spreadsheet.id}/agent-request`, {
+        body: JSON.stringify({ message: text }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      const run = createBenchmarkRunFromAnswer({
+        answer,
+        answerSeconds: (performance.now() - answerStarted) / 1000,
+        prompt: text,
+        spreadsheetFilename: spreadsheet.filename,
+        spreadsheetId: spreadsheet.id,
+        totalSeconds: (performance.now() - totalStarted) / 1000,
+        uploadSeconds: null,
+      });
+      const savedRun = await saveBenchmarkRun(run);
+      setLatestChatRun(savedRun);
+      setRenderedMessages((current) => [...current, { id: answer.requestId, role: "assistant", text: answer.response }]);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Agent request failed";
+      const failedRun: BenchmarkRun = {
+        id: crypto.randomUUID(),
+        answer: "",
+        answerSeconds: 0,
+        error: message,
+        evidence: null,
+        inputTokens: null,
+        modelName: null,
+        modelProvider: null,
+        outputTokens: null,
+        prompt: text,
+        quality: null,
+        spreadsheetFilename: spreadsheet.filename,
+        spreadsheetId: spreadsheet.id,
+        timestamp: new Date().toISOString(),
+        totalSeconds: (performance.now() - totalStarted) / 1000,
+        totalTokens: null,
+        uploadSeconds: null,
+      };
+      await saveBenchmarkRun(failedRun).catch(() => undefined);
+      setRenderedMessages((current) => [...current, { id: failedRun.id, role: "assistant", text: message }]);
+    } finally {
+      setIsSending(false);
+    }
   }
 
   function clearChat() {
     if (isBusy) return;
-    clearHistory();
     setRenderedMessages([]);
+    setLatestChatRun(null);
+    setShowEvidence(false);
     setInput("");
   }
 
@@ -1534,6 +1665,17 @@ function ChatSurface({
             Original file
           </Button>
           {activeView === "chat" ? (
+            <>
+              <Button
+                disabled={!latestChatRun}
+                icon={<Search size={16} />}
+                size="sm"
+                type="button"
+                variant="secondary"
+                onClick={() => setShowEvidence((value) => !value)}
+              >
+                {showEvidence ? "Hide evidence" : "Evidence"}
+              </Button>
             <Button
               disabled={isBusy || renderedMessages.length === 0}
               icon={<Trash2 size={16} />}
@@ -1544,6 +1686,7 @@ function ChatSurface({
             >
               Clear chat
             </Button>
+            </>
           ) : null}
         </div>
       </header>
@@ -1573,6 +1716,7 @@ function ChatSurface({
                   />
                 ))
               )}
+              {showEvidence && latestChatRun ? <EvidenceViewer run={latestChatRun} /> : null}
             </div>
           ) : activeView === "sqlite" ? (
             <SQLiteViewer
@@ -2193,24 +2337,11 @@ function AgentChatPage() {
       }
     },
   });
-  const { clearHistory, messages, sendMessage, status } = useAgentChat({ agent: liveAgent });
-  const isBusy = status === "submitted" || status === "streaming";
+  const [isSending, setIsSending] = useState(false);
+  const isBusy = isSending;
   const wasBusyRef = useRef(false);
-
-  useEffect(() => {
-    setRenderedMessages((current) => {
-      const previousById = new Map(current.map((message) => [message.id, message]));
-      const next = messages
-        .map((message) => {
-          const text = textFromMessage(message).trim();
-          const previous = previousById.get(message.id);
-          return { id: message.id, role: message.role, text: text || previous?.text || "" };
-        })
-        .filter((message) => message.text.length > 0);
-      if (next.length === 0 && current.length > 0 && messages.length > 0) return current;
-      return next;
-    });
-  }, [messages]);
+  const [latestChatRun, setLatestChatRun] = useState<BenchmarkRun | null>(null);
+  const [showEvidence, setShowEvidence] = useState(false);
 
   useEffect(() => {
     if (activeView !== "sqlite" || !agentRecord || analysisTables) return;
@@ -2242,17 +2373,84 @@ function AgentChatPage() {
     wasBusyRef.current = isBusy;
   }, [isBusy]);
 
-  function submitMessage(event: FormEvent<HTMLFormElement>) {
+  async function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = input.trim();
-    if (!text || isBusy) return;
-    sendMessage({ text });
+    if (!text || isBusy || !agentRecord) return;
+
+    const totalStarted = performance.now();
+    setRenderedMessages((current) => [...current, { id: crypto.randomUUID(), role: "user", text }]);
     setInput("");
+    setIsSending(true);
+    setShowEvidence(false);
+
+    try {
+      const answerStarted = performance.now();
+      const answer = await fetchJson<AgentRequestResponse>(`/api/agents/${agentId}/agent-request`, {
+        body: JSON.stringify({ message: text }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      const run = createBenchmarkRunFromAnswer({
+        answer: {
+          ...answer,
+          selection:
+            answer.selection ??
+            ({
+              candidates: sheets.map((sheet) => ({
+                description: `${sheet.category || "Uncategorised"} · ${formatBytes(sheet.size_bytes)} · ${extractionLabel(sheet)}`,
+                filename: sheet.filename,
+                id: sheet.id,
+                status: sheet.status ?? "ready",
+              })),
+              model: answer.model,
+              reason: "Multi-sheet agent chat used the attached source set, so semantic spreadsheet selection was handled by the agent context.",
+              score: null,
+              usage: answer.usage,
+            } satisfies BenchmarkSelectionEvidence),
+        },
+        answerSeconds: (performance.now() - answerStarted) / 1000,
+        prompt: text,
+        spreadsheetFilename: agentRecord.name,
+        spreadsheetId: agentId,
+        totalSeconds: (performance.now() - totalStarted) / 1000,
+        uploadSeconds: null,
+      });
+      const savedRun = await saveBenchmarkRun(run);
+      setLatestChatRun(savedRun);
+      setRenderedMessages((current) => [...current, { id: answer.requestId, role: "assistant", text: answer.response }]);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Agent request failed";
+      const failedRun: BenchmarkRun = {
+        id: crypto.randomUUID(),
+        answer: "",
+        answerSeconds: 0,
+        error: message,
+        evidence: null,
+        inputTokens: null,
+        modelName: null,
+        modelProvider: null,
+        outputTokens: null,
+        prompt: text,
+        quality: null,
+        spreadsheetFilename: agentRecord.name,
+        spreadsheetId: agentId,
+        timestamp: new Date().toISOString(),
+        totalSeconds: (performance.now() - totalStarted) / 1000,
+        totalTokens: null,
+        uploadSeconds: null,
+      };
+      await saveBenchmarkRun(failedRun).catch(() => undefined);
+      setRenderedMessages((current) => [...current, { id: failedRun.id, role: "assistant", text: message }]);
+    } finally {
+      setIsSending(false);
+    }
   }
 
   function clearChat() {
-    clearHistory();
     setRenderedMessages([]);
+    setLatestChatRun(null);
+    setShowEvidence(false);
     setInput("Summarize the attached sheets.");
   }
 
@@ -2293,6 +2491,17 @@ function AgentChatPage() {
             onValueChange={(value) => setActiveView(value as MultiAgentView)}
           />
           {activeView === "chat" ? (
+            <>
+            <Button
+              disabled={!latestChatRun}
+              icon={<Search size={16} />}
+              size="sm"
+              type="button"
+              variant="secondary"
+              onClick={() => setShowEvidence((value) => !value)}
+            >
+              {showEvidence ? "Hide evidence" : "Evidence"}
+            </Button>
             <Button
               disabled={isBusy || renderedMessages.length === 0}
               icon={<Trash2 size={16} />}
@@ -2303,6 +2512,7 @@ function AgentChatPage() {
             >
               Clear chat
             </Button>
+            </>
           ) : null}
         </div>
       </header>
@@ -2323,6 +2533,7 @@ function AgentChatPage() {
                     message={message}
                   />
                 ))}
+                {showEvidence && latestChatRun ? <EvidenceViewer run={latestChatRun} /> : null}
               </div>
               <form className="composer" onSubmit={submitMessage}>
                 <Input aria-label="Message" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask this multi-sheet agent..." />
@@ -2421,41 +2632,27 @@ function AgentSourcesView({ sheets }: { sheets: Spreadsheet[] }) {
 }
 
 function BenchmarkDashboardPage() {
-  const [file, setFile] = useState<File | null>(null);
-  const [spreadsheetId, setSpreadsheetId] = useState("");
-  const [prompt, setPrompt] = useState("Summarize this spreadsheet and cite the most important rows.");
-  const [preExtract, setPreExtract] = useState(true);
-  const [models, setModels] = useState<AiModelOption[]>([]);
-  const [selectedModelKey, setSelectedModelKey] = useState("");
-  const [isRunning, setIsRunning] = useState(false);
+  const [runs, setRuns] = useState<BenchmarkRun[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [runs, setRuns] = useState<BenchmarkRun[]>(() => {
-    try {
-      return JSON.parse(localStorage.getItem("xlsx-song-benchmark-runs") ?? "[]") as BenchmarkRun[];
-    } catch {
-      return [];
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    async function syncRuns() {
+      try {
+        const data = await fetchJson<BenchmarkRunsResponse>("/api/benchmarks/runs");
+        setRuns(data.runs);
+        setError(null);
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : "Could not load benchmark runs");
+      } finally {
+        setIsLoading(false);
+      }
     }
-  });
 
-  useEffect(() => {
-    localStorage.setItem("xlsx-song-benchmark-runs", JSON.stringify(runs));
-  }, [runs]);
-
-  useEffect(() => {
-    let isMounted = true;
-    fetchJson<AiModelsResponse>("/api/models")
-      .then((data) => {
-        if (!isMounted) return;
-        setModels(data.models);
-        const defaultKey = data.defaultModel ? aiModelKey(data.defaultModel) : "";
-        setSelectedModelKey((current) => current || defaultKey);
-      })
-      .catch((caught: Error) => {
-        if (isMounted) setError(caught.message);
-      });
-
+    void syncRuns();
+    window.addEventListener("benchmark-runs-updated", syncRuns);
     return () => {
-      isMounted = false;
+      window.removeEventListener("benchmark-runs-updated", syncRuns);
     };
   }, []);
 
@@ -2463,118 +2660,24 @@ function BenchmarkDashboardPage() {
   const averageAnswerSeconds = average(completedRuns.map((run) => run.answerSeconds));
   const averageTotalTokens = average(completedRuns.map((run) => run.totalTokens));
   const averageQuality = average(completedRuns.map((run) => run.quality));
-  const latestRun = completedRuns[0];
-  const tokenPeak = Math.max(1, ...completedRuns.map((run) => run.totalTokens ?? 0));
-  const suggestedPrompts = [
-    "Show the biggest changes in this spreadsheet.",
-    "Which rows look like outliers?",
-    "Summarize totals by category.",
-    "Find the highest value and explain why.",
-  ];
-  const selectedModel = models.find((model) => aiModelKey(model) === selectedModelKey) ?? models[0] ?? null;
 
-  async function submitBenchmark(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const text = prompt.trim();
-    if (!text || isRunning) return;
-
-    setError(null);
-    setIsRunning(true);
-
-    const totalStarted = performance.now();
-    let uploadSeconds: number | null = null;
-    let targetSpreadsheetId = spreadsheetId.trim();
-    let spreadsheetFilename: string | null = null;
-
+  async function setQuality(runId: string, quality: number) {
+    setRuns((current) => current.map((run) => (run.id === runId ? { ...run, quality } : run)));
     try {
-      if (file) {
-        const formData = new FormData();
-        formData.append("spreadsheet", file);
-        formData.append("spreadsheetId", crypto.randomUUID());
-        formData.append("preExtract", String(preExtract));
-
-        const uploadStarted = performance.now();
-        const upload = await fetchJson<SpreadsheetResponse>("/api/spreadsheets", {
-          body: formData,
-          method: "POST",
-        });
-        uploadSeconds = (performance.now() - uploadStarted) / 1000;
-        targetSpreadsheetId = upload.spreadsheet.id;
-        spreadsheetFilename = upload.spreadsheet.filename;
-        setSpreadsheetId(targetSpreadsheetId);
-      }
-
-      const answerStarted = performance.now();
-      const endpoint = targetSpreadsheetId ? `/api/spreadsheets/${targetSpreadsheetId}/agent-request` : "/api/benchmarks/query";
-      const answer = await fetchJson<AgentRequestResponse>(endpoint, {
-        body: JSON.stringify({ message: text, model: selectedModel }),
-        headers: { "content-type": "application/json" },
-        method: "POST",
-      });
-      const answerSeconds = (performance.now() - answerStarted) / 1000;
-      const resolvedSpreadsheetId = answer.selectedSpreadsheet?.id ?? targetSpreadsheetId;
-      const resolvedSpreadsheetFilename = answer.selectedSpreadsheet?.filename ?? spreadsheetFilename;
-      if (answer.selectedSpreadsheet?.id) {
-        setSpreadsheetId(answer.selectedSpreadsheet.id);
-      }
-      const inputTokens = tokenCount(answer.usage, ["inputTokens", "promptTokens", "prompt_tokens", "input_tokens"]);
-      const outputTokens = tokenCount(answer.usage, ["outputTokens", "completionTokens", "completion_tokens", "output_tokens"]);
-      const reportedTotalTokens = tokenCount(answer.usage, ["totalTokens", "total_tokens"]);
-      const totalTokens = reportedTotalTokens ?? (inputTokens !== null && outputTokens !== null ? inputTokens + outputTokens : null);
-
-      setRuns((current) => [
-        {
-          id: crypto.randomUUID(),
-          answer: answer.response,
-          answerSeconds,
-          finishReason: answer.finishReason,
-          inputTokens,
-          modelName: answer.model?.model ?? null,
-          modelProvider: answer.model?.provider ?? null,
-          outputTokens,
-          prompt: text,
-          quality: null,
-          requestId: answer.requestId,
-          spreadsheetFilename: resolvedSpreadsheetFilename,
-          spreadsheetId: resolvedSpreadsheetId,
-          timestamp: new Date().toISOString(),
-          totalSeconds: (performance.now() - totalStarted) / 1000,
-          totalTokens,
-          uploadSeconds,
-        },
-        ...current,
-      ]);
+      await updateBenchmarkRunQuality(runId, quality);
     } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "Benchmark run failed";
-      setError(message);
-      setRuns((current) => [
-        {
-          id: crypto.randomUUID(),
-          answer: "",
-          answerSeconds: 0,
-          error: message,
-          inputTokens: null,
-          modelName: null,
-          modelProvider: null,
-          outputTokens: null,
-          prompt: text,
-          quality: null,
-          spreadsheetFilename,
-          spreadsheetId: targetSpreadsheetId || "unresolved",
-          timestamp: new Date().toISOString(),
-          totalSeconds: (performance.now() - totalStarted) / 1000,
-          totalTokens: null,
-          uploadSeconds,
-        },
-        ...current,
-      ]);
-    } finally {
-      setIsRunning(false);
+      setError(caught instanceof Error ? caught.message : "Could not save quality score");
     }
   }
 
-  function setQuality(runId: string, quality: number) {
-    setRuns((current) => current.map((run) => (run.id === runId ? { ...run, quality } : run)));
+  async function clearRuns() {
+    try {
+      await fetchJson<{ ok: true }>("/api/benchmarks/runs", { method: "DELETE" });
+      setRuns([]);
+      window.dispatchEvent(new CustomEvent("benchmark-runs-updated"));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not clear benchmark runs");
+    }
   }
 
   return (
@@ -2586,42 +2689,18 @@ function BenchmarkDashboardPage() {
         </Link>
 
         <section className="source-panel">
-          <p className="eyebrow">Data</p>
-          <h2>{file?.name ?? "Spreadsheet agent"}</h2>
-          <label className="benchmark-field">
-            <span>Spreadsheet file</span>
-            <input
-              accept=".xlsx,.xls,.csv,.tsv,.ods,.xml"
-              type="file"
-              onChange={(event) => {
-                setFile(event.target.files?.[0] ?? null);
-                setError(null);
-              }}
-            />
-          </label>
-          <label className="benchmark-field">
-            <span>Spreadsheet id override</span>
-            <input value={spreadsheetId} onChange={(event) => setSpreadsheetId(event.target.value)} placeholder="optional uuid" />
-          </label>
-          <label className="mode-toggle benchmark-toggle">
-            <input checked={preExtract} disabled={isRunning} type="checkbox" onChange={(event) => setPreExtract(event.target.checked)} />
-            <span />
-            <strong>{preExtract ? "SQL knowledge base" : "Raw file only"}</strong>
-          </label>
+          <p className="eyebrow">Benchmark log</p>
+          <h2>{runs.length} captured {runs.length === 1 ? "run" : "runs"}</h2>
+          <p className="muted">Runs are captured when prompts are answered in a spreadsheet or multi-sheet chat canvas.</p>
         </section>
 
         <section className="source-panel">
-          <p className="eyebrow">Suggested asks</p>
-          <div className="prompt-chip-list">
-            {suggestedPrompts.map((suggestion) => (
-              <button key={suggestion} type="button" onClick={() => setPrompt(suggestion)}>
-                {suggestion}
-              </button>
-            ))}
-          </div>
+          <p className="eyebrow">Saved in D1</p>
+          <h2>benchmark_runs</h2>
+          <p className="muted">The benchmark log is persisted in the Cloudflare D1 database, not browser localStorage.</p>
         </section>
 
-        <Button className="clear-button" type="button" onClick={() => setRuns([])} disabled={runs.length === 0} variant="secondary">
+        <Button className="clear-button" type="button" onClick={clearRuns} disabled={runs.length === 0} variant="secondary">
           <Trash2 size={16} />
           <span>Clear runs</span>
         </Button>
@@ -2630,44 +2709,10 @@ function BenchmarkDashboardPage() {
       <main className="analytics-main">
         <header className="analytics-title">
           <div>
-            <p className="eyebrow">Search analytics</p>
-            <h1>Ask your spreadsheet anything</h1>
-          </div>
-          <div className="model-badge">
-            <Sparkles size={16} />
-            <span>{aiModelLabel(selectedModel)}</span>
-            <select
-              aria-label="Benchmark model"
-              disabled={isRunning || models.length === 0}
-              value={selectedModelKey}
-              onChange={(event) => setSelectedModelKey(event.target.value)}
-            >
-              {models.map((model) => (
-                <option key={aiModelKey(model)} value={aiModelKey(model)}>
-                  {aiModelLabel(model)}
-                </option>
-              ))}
-            </select>
-            <ChevronDown size={16} />
+            <p className="eyebrow">Model analytics</p>
+            <h1>Benchmark run log</h1>
           </div>
         </header>
-
-        <form className="thoughtspot-search" onSubmit={submitBenchmark}>
-          <Search size={22} />
-          <input value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Ask a question about your spreadsheet..." />
-          <Button
-            className="primary-button"
-            loading={isRunning}
-            type="submit"
-            variant="primary"
-            disabled={isRunning || !prompt.trim()}
-          >
-            <Send size={18} />
-            <span>{isRunning ? "Running" : "Ask"}</span>
-          </Button>
-        </form>
-
-        {error ? <Banner variant="error" title="Benchmark failed" description={error} /> : null}
 
         <section className="metric-grid">
           <MetricCard icon={<Gauge size={18} />} label="Runs" value={String(completedRuns.length)} />
@@ -2676,44 +2721,71 @@ function BenchmarkDashboardPage() {
           <MetricCard icon={<Star size={18} />} label="Avg quality" value={averageQuality === null ? "n/a" : `${averageQuality.toFixed(1)}/5`} />
         </section>
 
-        <section className="answer-canvas">
-          <article className="answer-card">
-            <header>
-              <div>
-                <p className="eyebrow">Answer</p>
-                <h2>{latestRun?.prompt ?? "Run a search to generate an answer"}</h2>
-              </div>
-              {latestRun ? <span className="score-pill">{formatSeconds(latestRun.answerSeconds)}</span> : null}
-            </header>
-            <p>{latestRun?.answer ?? "The answer will appear here with model, token, speed, and quality metrics."}</p>
-          </article>
-
-          <article className="trend-card">
-            <header>
-              <p className="eyebrow">Token trend</p>
-              <h2>Recent runs</h2>
-            </header>
-            <div className="token-bars">
-              {completedRuns.length === 0 ? (
-                <span className="trend-empty">No token data</span>
-              ) : (
-                completedRuns
-                  .slice(0, 8)
-                  .reverse()
-                  .map((run) => (
-                    <div className="token-bar" key={run.id}>
-                      <span style={{ height: `${Math.max(8, ((run.totalTokens ?? 0) / tokenPeak) * 100)}%` }} />
-                      <small>{formatNumber(run.totalTokens)}</small>
-                    </div>
-                  ))
-              )}
-            </div>
-          </article>
-        </section>
-
+        {error ? <Banner variant="error" title="Benchmark log error" description={error} /> : null}
+        {isLoading ? <div className="status-line"><Loader size="sm" /><span>Loading benchmark runs</span></div> : null}
         <BenchmarkResults runs={runs} setQuality={setQuality} />
       </main>
     </section>
+  );
+}
+
+function EvidenceViewer({ run }: { run?: BenchmarkRun }) {
+  const evidence = run?.evidence;
+  const candidates = evidence?.candidates ?? [];
+  const selectionTokens =
+    tokenCount(evidence?.usage ?? undefined, ["totalTokens", "total_tokens"]) ??
+    tokenCount(evidence?.usage ?? undefined, ["inputTokens", "promptTokens", "prompt_tokens", "input_tokens"]);
+
+  return (
+    <article className="evidence-card">
+      <header>
+        <div>
+          <p className="eyebrow">Evidence</p>
+          <h2>{run ? run.spreadsheetFilename ?? run.spreadsheetId : "No answer yet"}</h2>
+        </div>
+        {evidence?.score !== undefined && evidence.score !== null ? <span className="score-pill">{Math.round(evidence.score * 100)}%</span> : null}
+      </header>
+
+      {!run ? (
+        <p className="evidence-empty">Semantic selection, source candidates, and reasoning will appear with the answer.</p>
+      ) : (
+        <>
+          <p className="evidence-reason">{evidence?.reason ?? "No semantic selection reason was returned for this run."}</p>
+          <dl className="evidence-meta">
+            <div>
+              <dt>Request</dt>
+              <dd>{run.requestId ?? "n/a"}</dd>
+            </div>
+            <div>
+              <dt>Selection model</dt>
+              <dd>{evidence?.model ? aiModelLabel(evidence.model as AiModelOption) : `${run.modelProvider ?? "n/a"} · ${run.modelName ?? "n/a"}`}</dd>
+            </div>
+            <div>
+              <dt>Selection time</dt>
+              <dd>{typeof evidence?.durationMs === "number" ? `${evidence.durationMs}ms` : "n/a"}</dd>
+            </div>
+            <div>
+              <dt>Selection tokens</dt>
+              <dd>{formatNumber(selectionTokens)}</dd>
+            </div>
+          </dl>
+
+          {candidates.length > 0 ? (
+            <div className="evidence-candidates">
+              {candidates.slice(0, 4).map((candidate) => (
+                <article key={candidate.id}>
+                  <h3>{candidate.filename}</h3>
+                  <p>{candidate.description ?? `${candidate.rowCount ?? 0} rows across ${candidate.tables?.length ?? 0} tables.`}</p>
+                  <small>
+                    {candidate.status ?? "ready"} · {candidate.columns?.slice(0, 6).join(", ") || "metadata match"}
+                  </small>
+                </article>
+              ))}
+            </div>
+          ) : null}
+        </>
+      )}
+    </article>
   );
 }
 

@@ -159,6 +159,48 @@ type CreateLibraryAgentPayload = {
   spreadsheetIds?: unknown;
 };
 
+type BenchmarkRunPayload = {
+  answer?: unknown;
+  answerSeconds?: unknown;
+  error?: unknown;
+  evidence?: unknown;
+  finishReason?: unknown;
+  inputTokens?: unknown;
+  modelName?: unknown;
+  modelProvider?: unknown;
+  outputTokens?: unknown;
+  prompt?: unknown;
+  quality?: unknown;
+  requestId?: unknown;
+  spreadsheetFilename?: unknown;
+  spreadsheetId?: unknown;
+  totalSeconds?: unknown;
+  totalTokens?: unknown;
+  uploadSeconds?: unknown;
+};
+
+type BenchmarkRunRow = {
+  answer: string;
+  answer_seconds: number;
+  created_at: string;
+  error: string | null;
+  evidence_json: string | null;
+  finish_reason: string | null;
+  id: string;
+  input_tokens: number | null;
+  model_name: string | null;
+  model_provider: string | null;
+  output_tokens: number | null;
+  prompt: string;
+  quality: number | null;
+  request_id: string | null;
+  spreadsheet_filename: string | null;
+  spreadsheet_id: string;
+  total_seconds: number;
+  total_tokens: number | null;
+  upload_seconds: number | null;
+};
+
 export type AgentInitializationPayload = {
   agentId: string;
   description: string;
@@ -1139,6 +1181,117 @@ async function sendBenchmarkQuery(request: Request, env: Env) {
   }
 }
 
+function numberOrNull(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stringOrNull(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function benchmarkRunFromRow(row: BenchmarkRunRow) {
+  return {
+    id: row.id,
+    answer: row.answer,
+    answerSeconds: row.answer_seconds,
+    error: row.error ?? undefined,
+    evidence: row.evidence_json ? JSON.parse(row.evidence_json) : null,
+    finishReason: row.finish_reason ?? undefined,
+    inputTokens: row.input_tokens,
+    modelName: row.model_name,
+    modelProvider: row.model_provider,
+    outputTokens: row.output_tokens,
+    prompt: row.prompt,
+    quality: row.quality,
+    requestId: row.request_id ?? undefined,
+    spreadsheetFilename: row.spreadsheet_filename,
+    spreadsheetId: row.spreadsheet_id,
+    timestamp: row.created_at,
+    totalSeconds: row.total_seconds,
+    totalTokens: row.total_tokens,
+    uploadSeconds: row.upload_seconds,
+  };
+}
+
+async function listBenchmarkRuns(env: Env) {
+  const { results } = await env.DB.prepare(
+    [
+      "SELECT id, prompt, answer, error, model_provider, model_name, spreadsheet_id, spreadsheet_filename, request_id, finish_reason,",
+      "answer_seconds, total_seconds, upload_seconds, input_tokens, output_tokens, total_tokens, quality, evidence_json, created_at",
+      "FROM benchmark_runs",
+      "ORDER BY created_at DESC",
+      "LIMIT 500",
+    ].join(" "),
+  ).all<BenchmarkRunRow>();
+
+  return json({ runs: (results ?? []).map(benchmarkRunFromRow) });
+}
+
+async function createBenchmarkRun(request: Request, env: Env) {
+  const body = (await request.json().catch(() => ({}))) as BenchmarkRunPayload;
+  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+  const spreadsheetId = typeof body.spreadsheetId === "string" && body.spreadsheetId.trim() ? body.spreadsheetId.trim() : "unresolved";
+  if (!prompt) return json({ error: "Benchmark prompt is required." }, { status: 400 });
+
+  const id = crypto.randomUUID();
+  const evidenceJson = body.evidence === undefined ? null : JSON.stringify(body.evidence);
+  await env.DB.prepare(
+    [
+      "INSERT INTO benchmark_runs",
+      "(id, prompt, answer, error, model_provider, model_name, spreadsheet_id, spreadsheet_filename, request_id, finish_reason,",
+      "answer_seconds, total_seconds, upload_seconds, input_tokens, output_tokens, total_tokens, quality, evidence_json)",
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ].join(" "),
+  )
+    .bind(
+      id,
+      prompt,
+      typeof body.answer === "string" ? body.answer : "",
+      stringOrNull(body.error),
+      stringOrNull(body.modelProvider),
+      stringOrNull(body.modelName),
+      spreadsheetId,
+      stringOrNull(body.spreadsheetFilename),
+      stringOrNull(body.requestId),
+      stringOrNull(body.finishReason),
+      numberOrNull(body.answerSeconds) ?? 0,
+      numberOrNull(body.totalSeconds) ?? 0,
+      numberOrNull(body.uploadSeconds),
+      numberOrNull(body.inputTokens),
+      numberOrNull(body.outputTokens),
+      numberOrNull(body.totalTokens),
+      numberOrNull(body.quality),
+      evidenceJson,
+    )
+    .run();
+
+  const row = await env.DB.prepare(
+    [
+      "SELECT id, prompt, answer, error, model_provider, model_name, spreadsheet_id, spreadsheet_filename, request_id, finish_reason,",
+      "answer_seconds, total_seconds, upload_seconds, input_tokens, output_tokens, total_tokens, quality, evidence_json, created_at",
+      "FROM benchmark_runs WHERE id = ?",
+    ].join(" "),
+  )
+    .bind(id)
+    .first<BenchmarkRunRow>();
+
+  return json({ run: row ? benchmarkRunFromRow(row) : null }, { status: 201 });
+}
+
+async function updateBenchmarkRun(request: Request, env: Env, runId: string) {
+  const body = (await request.json().catch(() => ({}))) as { quality?: unknown };
+  const quality = numberOrNull(body.quality);
+  if (quality === null || quality < 1 || quality > 5) return json({ error: "Quality must be a number from 1 to 5." }, { status: 400 });
+
+  await env.DB.prepare("UPDATE benchmark_runs SET quality = ? WHERE id = ?").bind(Math.round(quality), runId).run();
+  return json({ ok: true });
+}
+
+async function deleteBenchmarkRuns(env: Env) {
+  await env.DB.prepare("DELETE FROM benchmark_runs").run();
+  return json({ ok: true });
+}
+
 async function selectSpreadsheetForPrompt(env: Env, message: string, selectedModel?: ModelEntry) {
   const candidates = await spreadsheetSearchCandidates(env);
   if (candidates.length === 0) {
@@ -1362,8 +1515,14 @@ async function sendLibraryAgentRequest(request: Request, env: Env, agentId: stri
   if (typeof body.message !== "string" || !body.message.trim()) {
     return json({ error: "Send JSON with a non-empty 'message' string." }, { status: 400 });
   }
+  let selectedModel: ModelEntry | undefined;
+  try {
+    selectedModel = requestedModelEntry(env, body);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "Invalid model." }, { status: 400 });
+  }
 
-  return sendAgentMessage(env, agent.agent_name, body.message);
+  return sendAgentMessage(env, agent.agent_name, body.message, selectedModel);
 }
 
 async function createLibraryAgent(request: Request, env: Env) {
@@ -1578,6 +1737,23 @@ export default {
 
     if (url.pathname === "/api/benchmarks/query" && request.method === "POST") {
       return sendBenchmarkQuery(request, env);
+    }
+
+    if (url.pathname === "/api/benchmarks/runs" && request.method === "GET") {
+      return listBenchmarkRuns(env);
+    }
+
+    if (url.pathname === "/api/benchmarks/runs" && request.method === "POST") {
+      return createBenchmarkRun(request, env);
+    }
+
+    if (url.pathname === "/api/benchmarks/runs" && request.method === "DELETE") {
+      return deleteBenchmarkRuns(env);
+    }
+
+    const benchmarkRunMatch = url.pathname.match(/^\/api\/benchmarks\/runs\/([^/]+)$/);
+    if (benchmarkRunMatch && request.method === "PATCH") {
+      return updateBenchmarkRun(request, env, benchmarkRunMatch[1]);
     }
 
     if (url.pathname === "/api/models" && request.method === "GET") {
