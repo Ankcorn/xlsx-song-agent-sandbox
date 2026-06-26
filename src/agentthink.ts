@@ -56,6 +56,11 @@ export class AgentThink extends Think<Env> {
       "Use query_agent_database for read-only SELECT/WITH analysis.",
       "Use execute_python only for read-only analysis against AGENT_DATABASE_JSON, an exported JSON snapshot of your private database.",
       "You may create or restructure derived tables only with the dedicated edit tools. Do not claim the original library sheets were edited.",
+      "When the user asks for cleaned, normalized, consolidated, or REST-ready data, use create_clean_table and generate a small JavaScript Dynamic Worker transform.",
+      "The generated Dynamic Worker must export default.fetch(request), read JSON from request.json(), and return Response.json({ name, description, grain, columns, rows, metadata }).",
+      "The request JSON contains { request: { name, description }, database, tables }, where tables maps table names to row arrays.",
+      "Generated clean table workers must return one flat JSON table with stable snake_case columns and source_table, source_row, source_ref provenance.",
+      "After creating a clean table, tell the user the exact table name and row count.",
       "When citing values, include source spreadsheet/table/source_ref/source_row where possible.",
       "Keep answers concise, concrete, and useful.",
       jsonRenderResponseInstructions(),
@@ -79,6 +84,16 @@ export class AgentThink extends Think<Env> {
           sql: z.string().min(1).describe("Read-only SELECT/WITH query used to populate the derived table."),
         }),
         execute: async ({ name, sql }) => this.createDerivedAgentTable(name, sql),
+      }),
+      create_clean_table: tool({
+        description:
+          "Create a cleaned, REST-friendly private SQLite table by running generated JavaScript in an isolated Dynamic Worker against this Agent's table snapshot.",
+        inputSchema: z.object({
+          description: z.string().min(1).describe("Plain-language purpose and grain for the cleaned table."),
+          javascript: z.string().min(1).describe("A complete JavaScript Worker module exporting default.fetch(request), returning the clean table JSON."),
+          name: z.string().min(1).describe("Stable name for the cleaned table, e.g. child_development_outcomes."),
+        }),
+        execute: async ({ description, javascript, name }) => this.createCleanAgentTable(name, description, javascript),
       }),
       describe_agent_database: tool({
         description: "Describe this multi-sheet Agent's private copied SQLite database, source sheets, and table mappings.",
@@ -117,6 +132,15 @@ export class AgentThink extends Think<Env> {
     if (url.pathname.endsWith("/agent-table") && request.method === "GET") {
       const tableName = url.searchParams.get("table");
       if (!tableName) return json({ error: "Missing table query parameter." }, { status: 400 });
+      if (url.searchParams.get("public") === "1") {
+        const result = this.getPublicAgentDatabaseTable(
+          tableName,
+          url.searchParams.get("limit"),
+          url.searchParams.get("offset"),
+          url.searchParams.get("agentId"),
+        );
+        return "error" in result ? json(result, { status: 404 }) : json(result);
+      }
       return json(this.getAgentDatabaseTable(tableName));
     }
     if (url.pathname.endsWith("/initialize-library-agent") && request.method === "POST") {
@@ -262,9 +286,17 @@ export class AgentThink extends Think<Env> {
         columns_json TEXT NOT NULL,
         row_count INTEGER NOT NULL,
         table_kind TEXT NOT NULL,
+        metadata_json TEXT,
         updated_at TEXT NOT NULL
       )
     `;
+    try {
+      this.ctx.storage.sql.exec("ALTER TABLE agent_table_mappings ADD COLUMN metadata_json TEXT");
+    } catch (error) {
+      if (!(error instanceof Error ? error.message : String(error)).toLowerCase().includes("duplicate column")) {
+        throw error;
+      }
+    }
     this.agentSchemaReady = true;
   }
 
@@ -384,8 +416,8 @@ export class AgentThink extends Think<Env> {
 
   private getAgentDatabaseTable(tableName: string) {
     this.ensureAgentSchema();
-    const table = this.sql<{ columns_json: string; row_count: number; source_name: string | null; table_name: string }>`
-      SELECT table_name, COALESCE(source_name, table_kind) AS source_name, columns_json, row_count
+    const table = this.sql<{ columns_json: string; metadata_json: string | null; row_count: number; source_name: string | null; table_name: string }>`
+      SELECT table_name, COALESCE(source_name, table_kind) AS source_name, columns_json, row_count, metadata_json
       FROM agent_table_mappings
       WHERE table_name = ${tableName}
       LIMIT 1
@@ -393,7 +425,32 @@ export class AgentThink extends Think<Env> {
     if (!table) return { columns: [], rows: [], table: null };
     const columns = parseStringArray(table.columns_json);
     const rows = [...this.ctx.storage.sql.exec(`SELECT * FROM ${this.quoteIdentifier(tableName)} LIMIT 200`)];
-    return { columns, rows, table: { ...table, columns } };
+    return { columns, rows, table: { ...table, columns, metadata: this.parseJsonObject(table.metadata_json) } };
+  }
+
+  private getPublicAgentDatabaseTable(tableName: string, limitParam?: string | null, offsetParam?: string | null, agentId?: string | null) {
+    this.ensureAgentSchema();
+    const table = this.sql<{ columns_json: string; metadata_json: string | null; row_count: number; source_name: string | null; table_name: string }>`
+      SELECT table_name, COALESCE(source_name, table_kind) AS source_name, columns_json, row_count, metadata_json
+      FROM agent_table_mappings
+      WHERE table_name = ${tableName}
+      LIMIT 1
+    `[0];
+    if (!table) return { error: "Table not found." };
+    const limit = this.clampInteger(limitParam, 100, 1, 500);
+    const offset = this.clampInteger(offsetParam, 0, 0, 1_000_000);
+    const rows = [...this.ctx.storage.sql.exec(`SELECT * FROM ${this.quoteIdentifier(tableName)} LIMIT ? OFFSET ?`, limit, offset)];
+    return {
+      agentId,
+      columns: parseStringArray(table.columns_json),
+      limit,
+      metadata: this.parseJsonObject(table.metadata_json),
+      offset,
+      rowCount: table.row_count,
+      rows,
+      sourceName: table.source_name,
+      table: table.table_name,
+    };
   }
 
   private queryAgentDatabase(sql: string) {
@@ -423,6 +480,43 @@ export class AgentThink extends Think<Env> {
       ON CONFLICT(table_name) DO UPDATE SET columns_json = excluded.columns_json, row_count = excluded.row_count, updated_at = excluded.updated_at
     `;
     return { tableName, columns, rowCount };
+  }
+
+  private async createCleanAgentTable(name: string, description: string, javascript: string) {
+    this.ensureAgentSchema();
+    const startedAt = Date.now();
+    const tableName = this.safeSqlIdentifier(`clean_${name}`);
+    const snapshot = this.exportAgentSnapshot(1000);
+    const worker = this.env.LOADER.load({
+      compatibilityDate: "2026-06-24",
+      globalOutbound: null,
+      limits: { cpuMs: 50, subRequests: 0 },
+      mainModule: "src/index.js",
+      modules: { "src/index.js": javascript },
+    });
+    const entrypoint = worker.getEntrypoint();
+    const response = await entrypoint.fetch(
+      new Request("https://clean-table.local/transform", {
+        body: JSON.stringify({ database: snapshot.database, request: { description, name }, tables: snapshot.tables }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      }),
+    );
+    if (!response.ok) {
+      throw new Error((await response.text()) || `Dynamic Worker failed with HTTP ${response.status}.`);
+    }
+    const text = await response.text();
+    if (text.length > 8_000_000) throw new Error("Clean table output is too large.");
+    const cleaned = this.normalizeCleanTableOutput(JSON.parse(text), name, description);
+    this.importCleanTable(tableName, cleaned);
+    this.recordTrace({
+      detail: { columns: cleaned.columns, description: cleaned.description, grain: cleaned.grain, rowCount: cleaned.rows.length, tableName },
+      durationMs: Date.now() - startedAt,
+      spanType: "clean_table",
+      status: "done",
+      title: `Created clean table ${tableName}`,
+    });
+    return { columns: cleaned.columns, description: cleaned.description, grain: cleaned.grain, rowCount: cleaned.rows.length, tableName };
   }
 
   private applyAgentDataPatch(sql: string) {
@@ -458,14 +552,128 @@ export class AgentThink extends Think<Env> {
     return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, success: result.success };
   }
 
-  private exportAgentSnapshot() {
+  private exportAgentSnapshot(limit = 500) {
     const tables = this.sql<{ table_name: string }>`SELECT table_name FROM agent_table_mappings ORDER BY table_name`;
     return {
       database: this.describeAgentDatabase(),
       tables: Object.fromEntries(
-        tables.map((table) => [table.table_name, [...this.ctx.storage.sql.exec(`SELECT * FROM ${this.quoteIdentifier(table.table_name)} LIMIT 500`)]]),
+        tables.map((table) => [table.table_name, [...this.ctx.storage.sql.exec(`SELECT * FROM ${this.quoteIdentifier(table.table_name)} LIMIT ?`, limit)]]),
       ),
     };
+  }
+
+  private importCleanTable(
+    tableName: string,
+    cleaned: { columns: string[]; description: string; grain: string; metadata: Record<string, unknown>; rows: Record<string, string | number | boolean | null>[] },
+  ) {
+    this.ctx.storage.sql.exec(`DROP TABLE IF EXISTS ${this.quoteIdentifier(tableName)}`);
+    const uniqueColumns = this.uniqueSqlColumns(cleaned.columns);
+    const defs = uniqueColumns.map((column) => `${this.quoteIdentifier(column)} TEXT`).join(", ");
+    this.ctx.storage.sql.exec(`CREATE TABLE ${this.quoteIdentifier(tableName)} (${defs || `${this.quoteIdentifier("value")} TEXT`})`);
+    const insertSql = [
+      `INSERT INTO ${this.quoteIdentifier(tableName)}`,
+      `(${uniqueColumns.map((column) => this.quoteIdentifier(column)).join(", ")})`,
+      `VALUES (${uniqueColumns.map(() => "?").join(", ")})`,
+    ].join(" ");
+    for (const row of cleaned.rows) {
+      this.ctx.storage.sql.exec(insertSql, ...uniqueColumns.map((column) => String(row[column] ?? "")));
+    }
+    this.sql`
+      INSERT INTO agent_table_mappings (table_name, spreadsheet_id, source_table_name, source_name, category, columns_json, row_count, table_kind, metadata_json, updated_at)
+      VALUES (
+        ${tableName},
+        NULL,
+        NULL,
+        ${cleaned.description},
+        ${"Cleaned"},
+        ${JSON.stringify(uniqueColumns)},
+        ${cleaned.rows.length},
+        ${"cleaned"},
+        ${JSON.stringify({ ...cleaned.metadata, description: cleaned.description, grain: cleaned.grain })},
+        ${new Date().toISOString()}
+      )
+      ON CONFLICT(table_name) DO UPDATE SET
+        source_name = excluded.source_name,
+        category = excluded.category,
+        columns_json = excluded.columns_json,
+        row_count = excluded.row_count,
+        table_kind = excluded.table_kind,
+        metadata_json = excluded.metadata_json,
+        updated_at = excluded.updated_at
+    `;
+  }
+
+  private normalizeCleanTableOutput(value: unknown, requestedName: string, requestedDescription: string) {
+    const input = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+    if (!input) throw new Error("Clean table worker must return a JSON object.");
+    if (!Array.isArray(input.rows)) throw new Error("Clean table worker output must include rows array.");
+    if (input.rows.length > 20_000) throw new Error("Clean table output has too many rows. Limit is 20,000.");
+
+    const rawColumns = Array.isArray(input.columns) ? input.columns.map((column) => String(column).trim()).filter(Boolean) : [];
+    const inferredColumns = new Set(rawColumns);
+    for (const row of input.rows) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("Every clean table row must be an object.");
+      Object.keys(row as Record<string, unknown>).forEach((column) => inferredColumns.add(column));
+    }
+    for (const provenanceColumn of ["source_table", "source_row", "source_ref"]) inferredColumns.add(provenanceColumn);
+    const originalColumns = [...inferredColumns];
+    const columns = this.uniqueSqlColumns(originalColumns);
+    if (columns.length === 0) throw new Error("Clean table worker output must include at least one column.");
+
+    const rows = input.rows.map((rawRow, index) => {
+      const row = rawRow as Record<string, unknown>;
+      const normalized: Record<string, string | number | boolean | null> = {};
+      originalColumns.forEach((originalColumn, columnIndex) => {
+        normalized[columns[columnIndex]] = this.normalizeSqlCell(row[originalColumn]);
+      });
+      const sourceTableColumn = columns[originalColumns.indexOf("source_table")];
+      const sourceRowColumn = columns[originalColumns.indexOf("source_row")];
+      const sourceRefColumn = columns[originalColumns.indexOf("source_ref")];
+      if (sourceTableColumn) normalized[sourceTableColumn] = this.normalizeSqlCell(row.source_table) ?? "unknown";
+      if (sourceRowColumn) normalized[sourceRowColumn] = this.normalizeSqlCell(row.source_row) ?? index + 1;
+      if (sourceRefColumn) {
+        const sourceTable = sourceTableColumn ? normalized[sourceTableColumn] : "unknown";
+        const sourceRow = sourceRowColumn ? normalized[sourceRowColumn] : index + 1;
+        normalized[sourceRefColumn] = this.normalizeSqlCell(row.source_ref) ?? `${sourceTable}!row:${sourceRow}`;
+      }
+      return normalized;
+    });
+
+    const metadataInput = input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata) ? (input.metadata as Record<string, unknown>) : {};
+    return {
+      columns,
+      description: typeof input.description === "string" && input.description.trim() ? input.description.trim() : requestedDescription,
+      grain: typeof input.grain === "string" && input.grain.trim() ? input.grain.trim() : "One row per cleaned observation.",
+      metadata: {
+        ...metadataInput,
+        requestedName,
+        source_summary: typeof input.source_summary === "string" ? input.source_summary : metadataInput.source_summary,
+      },
+      rows,
+    };
+  }
+
+  private normalizeSqlCell(value: unknown): string | number | boolean | null {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "string" || typeof value === "boolean") return value;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    return JSON.stringify(value);
+  }
+
+  private parseJsonObject(text: string | null) {
+    if (!text) return null;
+    try {
+      const value = JSON.parse(text) as unknown;
+      return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private clampInteger(value: string | null | undefined, fallback: number, min: number, max: number) {
+    const parsed = Number.parseInt(value ?? "", 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, parsed));
   }
 
   private deleteLibraryAgentData(dropTraces = true) {

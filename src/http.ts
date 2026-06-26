@@ -18,6 +18,7 @@ export type Env = {
   DB: D1Database;
   EXTRACTION_WORKFLOW: Workflow;
   HackathonAgent: any;
+  LOADER: WorkerLoader;
   SheetsThink: any;
   AgentThink: any;
   Sandbox: DurableObjectNamespace<SandboxType>;
@@ -1418,12 +1419,34 @@ export default {
       return stub.fetch("https://agent.local/agent-database");
     }
 
+    const publicAgentTablesMatch = url.pathname.match(/^\/public\/agents\/([^/]+)\/tables$/);
+    if (publicAgentTablesMatch && request.method === "GET") {
+      const agent = await getLibraryAgentRow(env, publicAgentTablesMatch[1]);
+      if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+      const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
+      return stub.fetch("https://agent.local/agent-database");
+    }
+
     const agentTableMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/tables\/([^/]+)$/);
     if (agentTableMatch && request.method === "GET") {
       const agent = await getLibraryAgentRow(env, agentTableMatch[1]);
       if (!agent) return json({ error: "Agent not found" }, { status: 404 });
       const tableUrl = new URL("https://agent.local/agent-table");
       tableUrl.searchParams.set("table", decodeURIComponent(agentTableMatch[2]));
+      const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
+      return stub.fetch(tableUrl);
+    }
+
+    const publicAgentTableMatch = url.pathname.match(/^\/public\/agents\/([^/]+)\/tables\/([^/]+)$/);
+    if (publicAgentTableMatch && request.method === "GET") {
+      const agent = await getLibraryAgentRow(env, publicAgentTableMatch[1]);
+      if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+      const tableUrl = new URL("https://agent.local/agent-table");
+      tableUrl.searchParams.set("table", decodeURIComponent(publicAgentTableMatch[2]));
+      tableUrl.searchParams.set("public", "1");
+      tableUrl.searchParams.set("agentId", publicAgentTableMatch[1]);
+      tableUrl.searchParams.set("limit", url.searchParams.get("limit") ?? "");
+      tableUrl.searchParams.set("offset", url.searchParams.get("offset") ?? "");
       const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
       return stub.fetch(tableUrl);
     }

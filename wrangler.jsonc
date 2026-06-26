@@ -15,6 +15,11 @@
   "ai": {
     "binding": "AI"
   },
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ],
   "vars": {
     // Set AI_GATEWAY_PROVIDER to "openai" or "anthropic" after adding BYOK provider keys in the AI Gateway dashboard.
     // Use AI_GATEWAY_FALLBACKS for chains like "anthropic:claude-sonnet-4-6,openai:gpt-5.5,workers-ai:@cf/moonshotai/kimi-k2.7-code".

@@ -35,7 +35,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { FormEvent, ReactNode, useEffect, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { JsonRenderReport } from "./jsonRender";
 import "./styles.css";
@@ -2174,6 +2174,7 @@ function AgentChatPage() {
   });
   const { clearHistory, messages, sendMessage, status } = useAgentChat({ agent: liveAgent });
   const isBusy = status === "submitted" || status === "streaming";
+  const wasBusyRef = useRef(false);
 
   useEffect(() => {
     setRenderedMessages((current) => {
@@ -2210,6 +2211,15 @@ function AgentChatPage() {
       .catch((caught: Error) => setViewerError(caught.message))
       .finally(() => setIsViewerLoading(false));
   }, [activeView, agentId, selectedTable]);
+
+  useEffect(() => {
+    if (wasBusyRef.current && !isBusy) {
+      setAnalysisTables(null);
+      setTableData(null);
+      setSelectedTable(null);
+    }
+    wasBusyRef.current = isBusy;
+  }, [isBusy]);
 
   function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
