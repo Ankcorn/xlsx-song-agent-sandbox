@@ -24,6 +24,7 @@ import {
   Gauge,
   History,
   Layers3,
+  Music,
   PanelRightClose,
   PanelRightOpen,
   Mic,
@@ -120,6 +121,25 @@ type AgentReport = {
 
 type AgentReportResponse = {
   report: AgentReport | null;
+};
+
+type AgentSong = {
+  audioUrl: string;
+  facts: string[];
+  generatedAt: string;
+  id: string;
+  isStale?: boolean;
+  latestDataUpdatedAt?: string | null;
+  modelId: string;
+  musicPrompt: string;
+  outputFormat: string;
+  prompt: string;
+  title: string | null;
+  updatedAt: string;
+};
+
+type AgentSongResponse = {
+  song: AgentSong | null;
 };
 
 type AgentTrace = {
@@ -3129,6 +3149,7 @@ function AgentChatPage() {
   });
   const [isSending, setIsSending] = useState(false);
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+  const [isGeneratingSong, setIsGeneratingSong] = useState(false);
   const isBusy = isSending;
   const wasBusyRef = useRef(false);
   const [latestChatRun, setLatestChatRun] = useState<BenchmarkRun | null>(null);
@@ -3298,6 +3319,24 @@ function AgentChatPage() {
     }
   }
 
+  async function generateSong() {
+    if (isGeneratingSong) return;
+    setIsGeneratingSong(true);
+    setError(null);
+    try {
+      await fetchJson<AgentSongResponse>(`/api/agents/${agentId}/song`, {
+        body: JSON.stringify({}),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      await navigate({ params: { agentId }, to: "/agents/$agentId/song" });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not generate song");
+    } finally {
+      setIsGeneratingSong(false);
+    }
+  }
+
   if (error) return <section className="content-band"><Link to="/agents" className="back-link"><ArrowLeft size={18} /><span>Agents</span></Link><Banner variant="error" title="Could not load agent" description={error} /></section>;
   if (!agentRecord) return <section className="content-band"><div className="status-line"><Loader size="sm" /><span>Loading agent</span></div></section>;
 
@@ -3326,6 +3365,14 @@ function AgentChatPage() {
             <FileText size={16} />
             <span>Edit report</span>
           </Link>
+          <Link className="nav-button" params={{ agentId }} to="/agents/$agentId/song">
+            <Music size={16} />
+            <span>Song</span>
+          </Link>
+          <Link className="nav-button" params={{ agentId }} to="/agents/$agentId/song/edit">
+            <Music size={16} />
+            <span>Edit song</span>
+          </Link>
           <Button
             disabled={isGeneratingReport}
             icon={<FileText size={16} />}
@@ -3336,6 +3383,17 @@ function AgentChatPage() {
             onClick={() => void generateReport()}
           >
             Generate report
+          </Button>
+          <Button
+            disabled={isGeneratingSong}
+            icon={<Music size={16} />}
+            loading={isGeneratingSong}
+            size="sm"
+            type="button"
+            variant="secondary"
+            onClick={() => void generateSong()}
+          >
+            Generate song
           </Button>
           <Tabs
             className="view-tabs"
@@ -3503,6 +3561,16 @@ function AgentReportEditPage() {
   return <AgentReportView agentId={agentId} mode="edit" />;
 }
 
+function AgentSongPage() {
+  const { agentId } = useParams({ from: "/agents/$agentId/song" });
+  return <AgentSongView agentId={agentId} mode="public" />;
+}
+
+function AgentSongEditPage() {
+  const { agentId } = useParams({ from: "/agents/$agentId/song/edit" });
+  return <AgentSongView agentId={agentId} mode="edit" />;
+}
+
 function AgentReportView({ agentId, mode }: { agentId: string; mode: "edit" | "public" }) {
   const [agentRecord, setAgentRecord] = useState<LibraryAgent | null>(null);
   const [report, setReport] = useState<AgentReport | null>(null);
@@ -3643,6 +3711,202 @@ function AgentReportView({ agentId, mode }: { agentId: string; mode: "edit" | "p
           contents={isPublic ? undefined : (
             <Button disabled={isGenerating} loading={isGenerating} type="button" variant="primary" onClick={() => void generateReport()}>
               Generate report
+            </Button>
+          )}
+        />
+      )}
+    </section>
+  );
+}
+
+function AgentSongView({ agentId, mode }: { agentId: string; mode: "edit" | "public" }) {
+  const [agentRecord, setAgentRecord] = useState<LibraryAgent | null>(null);
+  const [song, setSong] = useState<AgentSong | null>(null);
+  const [prompt, setPrompt] = useState("");
+  const [lengthSeconds, setLengthSeconds] = useState(45);
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    async function loadSong() {
+      try {
+        const [agentData, songData] = await Promise.all([
+          fetchJson<LibraryAgentResponse>(`/api/agents/${agentId}`),
+          fetchJson<AgentSongResponse>(`/api/agents/${agentId}/song`),
+        ]);
+        if (!isMounted) return;
+        setAgentRecord(agentData.agent);
+        setSong(songData.song);
+        setPrompt(songData.song?.prompt ?? "");
+        setError(null);
+      } catch (caught) {
+        if (isMounted) setError(caught instanceof Error ? caught.message : "Could not load song");
+      } finally {
+        if (isMounted) setIsLoading(false);
+      }
+    }
+    void loadSong();
+    return () => {
+      isMounted = false;
+    };
+  }, [agentId]);
+
+  async function generateSong(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    if (isGenerating) return;
+    setIsGenerating(true);
+    setError(null);
+    try {
+      const data = await fetchJson<AgentSongResponse>(`/api/agents/${agentId}/song`, {
+        body: JSON.stringify({ lengthMs: lengthSeconds * 1000, prompt }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      setSong(data.song);
+      if (data.song?.prompt) setPrompt(data.song.prompt);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not generate song");
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
+  const isPublic = mode === "public";
+  const audioUrl = song ? `${song.audioUrl}?v=${encodeURIComponent(song.updatedAt)}` : "";
+
+  return (
+    <section className={isPublic ? "report-public-page song-public-page" : "content-band report-page song-page"}>
+      {isPublic ? null : (
+        <Link to="/agents/$agentId" params={{ agentId }} className="back-link">
+          <ArrowLeft size={18} />
+          <span>Agent</span>
+        </Link>
+      )}
+      <header className={isPublic ? "report-public-header" : "section-header"}>
+        <div>
+          <p className="eyebrow">{isPublic ? "XLSX Song" : "Agent song"}</p>
+          <h1>{song?.title || agentRecord?.name || "Song"}</h1>
+          <p className="muted">
+            {agentRecord?.name ?? agentId}
+            {song?.generatedAt ? ` · generated ${formatDateTime(song.generatedAt)}` : ""}
+          </p>
+        </div>
+        {isPublic ? null : (
+          <div className="report-actions">
+            <Link className="nav-button" params={{ agentId }} to="/agents/$agentId/song">
+              <Music size={16} />
+              <span>View share page</span>
+            </Link>
+            {song ? (
+              <a className="nav-button" href={audioUrl} download>
+                <Download size={16} />
+                <span>Download audio</span>
+              </a>
+            ) : null}
+            <Button
+              disabled={isGenerating}
+              icon={<Music size={18} />}
+              loading={isGenerating}
+              type="button"
+              variant="primary"
+              onClick={() => void generateSong()}
+            >
+              {song ? "Regenerate" : "Generate song"}
+            </Button>
+          </div>
+        )}
+      </header>
+
+      {song?.isStale ? (
+        <Banner
+          title="New agent data available"
+          description={`This song was generated before the agent data was last updated${
+            song.latestDataUpdatedAt ? ` (${formatDateTime(song.latestDataUpdatedAt)})` : ""
+          }. Regenerate it from the edit song page to include the latest data.`}
+        />
+      ) : null}
+
+      {isPublic ? null : (
+        <form className="report-prompt" onSubmit={generateSong}>
+          <label className="form-field">
+            <span>Steer the song</span>
+            <Input
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              placeholder="Make it a witty synth-pop song about the biggest changes and surprising facts."
+            />
+          </label>
+          <label className="form-field song-length-field">
+            <span>Length seconds</span>
+            <Input
+              value={String(lengthSeconds)}
+              onChange={(event) => setLengthSeconds(Math.max(10, Math.min(120, Number(event.target.value) || 45)))}
+            />
+          </label>
+          <Button disabled={isGenerating} loading={isGenerating} type="submit" variant="secondary">
+            Regenerate with prompt
+          </Button>
+        </form>
+      )}
+
+      {error ? <Banner variant="error" title="Song error" description={error} /> : null}
+      {isLoading ? (
+        <div className="status-line">
+          <Loader size="sm" />
+          <span>Loading song</span>
+        </div>
+      ) : song ? (
+        <article className="song-artifact">
+          <section className="song-player-panel">
+            <div className="song-icon">
+              <Music size={32} />
+            </div>
+            <div>
+              <p className="eyebrow">Generated audio</p>
+              <h2>{song.title || "Agent song"}</h2>
+              <p className="muted">{song.modelId} · {song.outputFormat}</p>
+            </div>
+            <audio controls src={audioUrl} />
+            {isPublic ? (
+              <a className="nav-button" href={audioUrl} download>
+                <Download size={16} />
+                <span>Download audio</span>
+              </a>
+            ) : null}
+          </section>
+
+          <section className="song-details-grid">
+            <article>
+              <p className="eyebrow">Facts used</p>
+              {song.facts.length > 0 ? (
+                <ul>
+                  {song.facts.map((fact, index) => <li key={`${fact}-${index}`}>{fact}</li>)}
+                </ul>
+              ) : (
+                <p className="muted">No extracted facts were returned with this song.</p>
+              )}
+            </article>
+            <article>
+              <p className="eyebrow">Music prompt</p>
+              <pre>{song.musicPrompt}</pre>
+            </article>
+          </section>
+        </article>
+      ) : (
+        <Empty
+          className="empty-list"
+          icon={<Music size={42} />}
+          title="No song generated yet"
+          description={
+            isPublic
+              ? "This agent does not have a published song yet."
+              : "Generate a song from this agent's current working database."
+          }
+          contents={isPublic ? undefined : (
+            <Button disabled={isGenerating} loading={isGenerating} type="button" variant="primary" onClick={() => void generateSong()}>
+              Generate song
             </Button>
           )}
         />
@@ -4277,6 +4541,18 @@ const agentReportEditRoute = createRoute({
   path: "/agents/$agentId/report/edit",
 });
 
+const agentSongRoute = createRoute({
+  component: AgentSongPage,
+  getParentRoute: () => rootRoute,
+  path: "/agents/$agentId/song",
+});
+
+const agentSongEditRoute = createRoute({
+  component: AgentSongEditPage,
+  getParentRoute: () => rootRoute,
+  path: "/agents/$agentId/song/edit",
+});
+
 const benchmarkRoute = createRoute({
   component: BenchmarkDashboardPage,
   getParentRoute: () => rootRoute,
@@ -4304,6 +4580,8 @@ const routeTree = rootRoute.addChildren([
   agentRoute,
   agentReportRoute,
   agentReportEditRoute,
+  agentSongRoute,
+  agentSongEditRoute,
   benchmarkRoute,
   spreadsheetRoute,
   spreadsheetUploadFlowRoute,

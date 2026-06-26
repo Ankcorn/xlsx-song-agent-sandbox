@@ -2315,6 +2315,27 @@ export default {
       });
     }
 
+    const agentSongMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/song$/);
+    if (agentSongMatch && (request.method === "GET" || request.method === "POST")) {
+      const agent = await getLibraryAgentRow(env, agentSongMatch[1]);
+      if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+      if (agent.status !== "ready") return json({ error: `Agent is ${agent.status}. ${agent.error_message ?? ""}`.trim() }, { status: 409 });
+      const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
+      return stub.fetch("https://agent.local/song", {
+        body: request.method === "POST" ? await request.text() : undefined,
+        headers: request.method === "POST" ? { "content-type": request.headers.get("content-type") ?? "application/json" } : undefined,
+        method: request.method,
+      });
+    }
+
+    const agentSongAudioMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/song\/audio$/);
+    if (agentSongAudioMatch && request.method === "GET") {
+      const agent = await getLibraryAgentRow(env, agentSongAudioMatch[1]);
+      if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+      const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
+      return stub.fetch("https://agent.local/song/audio");
+    }
+
     const agentTablesMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/tables$/);
     if (agentTablesMatch && request.method === "GET") {
       const agent = await getLibraryAgentRow(env, agentTablesMatch[1]);

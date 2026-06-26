@@ -141,6 +141,14 @@ export class AgentThink extends Think<Env> {
       const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
       return json({ report: await this.generateAgentReport(prompt) });
     }
+    if (url.pathname.endsWith("/song") && request.method === "GET") return json({ song: this.getAgentSong() });
+    if (url.pathname.endsWith("/song") && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as { lengthMs?: unknown; prompt?: unknown };
+      const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+      const lengthMs = typeof body.lengthMs === "number" ? body.lengthMs : undefined;
+      return json({ song: await this.generateAgentSong(prompt, lengthMs) });
+    }
+    if (url.pathname.endsWith("/song/audio") && request.method === "GET") return this.getAgentSongAudio();
     if (url.pathname.endsWith("/agent-table") && request.method === "GET") {
       const tableName = url.searchParams.get("table");
       if (!tableName) return json({ error: "Missing table query parameter." }, { status: 400 });
@@ -379,6 +387,21 @@ export class AgentThink extends Think<Env> {
         updated_at TEXT NOT NULL
       )
     `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS agent_songs (
+        id TEXT PRIMARY KEY,
+        prompt TEXT NOT NULL,
+        title TEXT,
+        music_prompt TEXT NOT NULL,
+        facts_json TEXT NOT NULL,
+        audio_r2_key TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        output_format TEXT NOT NULL,
+        generated_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `;
     try {
       this.ctx.storage.sql.exec("ALTER TABLE agent_table_mappings ADD COLUMN metadata_json TEXT");
     } catch (error) {
@@ -509,6 +532,62 @@ export class AgentThink extends Think<Env> {
     };
   }
 
+  private getAgentSong() {
+    this.ensureAgentSchema();
+    const row = this.sql<{
+      audio_r2_key: string;
+      content_type: string;
+      facts_json: string;
+      generated_at: string;
+      id: string;
+      model_id: string;
+      music_prompt: string;
+      output_format: string;
+      prompt: string;
+      title: string | null;
+      updated_at: string;
+    }>`
+      SELECT id, prompt, title, music_prompt, facts_json, audio_r2_key, content_type, model_id, output_format, generated_at, updated_at
+      FROM agent_songs
+      WHERE id = 'current'
+      LIMIT 1
+    `[0];
+    if (!row) return null;
+    const latestDataUpdatedAt = this.latestAgentDataUpdatedAt();
+    return {
+      audioUrl: `/api/agents/${this.agentIdFromName()}/song/audio`,
+      facts: this.parseStringList(row.facts_json),
+      generatedAt: row.generated_at,
+      id: row.id,
+      isStale: latestDataUpdatedAt ? new Date(latestDataUpdatedAt).getTime() > new Date(row.generated_at).getTime() : false,
+      latestDataUpdatedAt,
+      modelId: row.model_id,
+      musicPrompt: row.music_prompt,
+      outputFormat: row.output_format,
+      prompt: row.prompt,
+      title: row.title,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private async getAgentSongAudio() {
+    this.ensureAgentSchema();
+    const row = this.sql<{ audio_r2_key: string; content_type: string; title: string | null }>`
+      SELECT audio_r2_key, content_type, title
+      FROM agent_songs
+      WHERE id = 'current'
+      LIMIT 1
+    `[0];
+    if (!row) return json({ error: "No song generated yet." }, { status: 404 });
+    const object = await this.env.SPREADSHEETS.get(row.audio_r2_key);
+    if (!object) return json({ error: "Generated song audio was not found." }, { status: 404 });
+    const headers = new Headers();
+    headers.set("Content-Type", row.content_type || object.httpMetadata?.contentType || "audio/mpeg");
+    headers.set("Content-Length", String(object.size));
+    headers.set("Content-Disposition", `inline; filename="${this.safeSongFilename(row.title)}.mp3"`);
+    return new Response(object.body, { headers });
+  }
+
   private latestAgentDataUpdatedAt() {
     this.ensureAgentSchema();
     const rows = [
@@ -594,6 +673,119 @@ export class AgentThink extends Think<Env> {
     }
   }
 
+  private async generateAgentSong(prompt: string, lengthMs?: number) {
+    this.ensureAgentSchema();
+    if (!this.env.ELEVENLABS_API_KEY) throw new Error("ELEVENLABS_API_KEY is not configured.");
+
+    const requestId = crypto.randomUUID();
+    const startedAt = Date.now();
+    const finalPrompt =
+      prompt ||
+      "Create a catchy, data-driven song from this agent's current datasets. Pull out memorable facts, trends, and caveats from the SQL snapshot and turn them into lyrics.";
+    const modelId = this.env.ELEVENLABS_MODEL_ID || "music_v1";
+    const outputFormat = this.env.ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128";
+    const musicLengthMs = Math.max(10_000, Math.min(120_000, lengthMs ?? 45_000));
+
+    this.recordTrace({
+      detail: { lengthMs: musicLengthMs, prompt: finalPrompt },
+      requestId,
+      spanType: "song",
+      status: "running",
+      title: "Generating agent song",
+    });
+
+    try {
+      const snapshot = this.exportAgentSnapshot(250);
+      const briefResult = await generateText({
+        model: this.getModel(),
+        prompt: [
+          finalPrompt,
+          "",
+          "Use the SQL-like agent database snapshot below to extract concrete facts and write a compact ElevenLabs music prompt.",
+          "Return ONLY JSON with this shape: {\"title\":\"...\",\"facts\":[\"...\"],\"musicPrompt\":\"...\"}.",
+          "The musicPrompt should include genre, mood, structure, vocal style, and lyrics or lyric guidance. Keep it under 3000 characters.",
+          "Use real facts from the snapshot; do not invent statistics.",
+          "",
+          JSON.stringify(snapshot),
+        ].join("\n"),
+        system: [
+          "You create music briefs from data-agent SQLite snapshots.",
+          "Pull out requested facts, trends, rankings, dates, and caveats, then transform them into a polished song-generation prompt.",
+          "Return strict JSON only.",
+        ].join("\n"),
+        temperature: 0.2,
+      });
+      const brief = this.parseSongBrief(generatedTextFromResult(briefResult), finalPrompt);
+      const musicUrl = new URL("https://api.elevenlabs.io/v1/music/stream");
+      musicUrl.searchParams.set("output_format", outputFormat);
+      const musicResponse = await fetch(musicUrl, {
+        body: JSON.stringify({
+          model_id: modelId,
+          music_length_ms: musicLengthMs,
+          prompt: brief.musicPrompt,
+        }),
+        headers: {
+          "Content-Type": "application/json",
+          "xi-api-key": this.env.ELEVENLABS_API_KEY,
+        },
+        method: "POST",
+      });
+
+      if (!musicResponse.ok) {
+        throw new Error((await musicResponse.text().catch(() => "")) || `ElevenLabs music request failed (${musicResponse.status}).`);
+      }
+
+      const audio = await musicResponse.arrayBuffer();
+      const contentType = musicResponse.headers.get("content-type") || "audio/mpeg";
+      const now = new Date().toISOString();
+      const audioR2Key = `agent-songs/${this.name}/current-${Date.now()}.mp3`;
+      await this.env.SPREADSHEETS.put(audioR2Key, audio, {
+        httpMetadata: { contentType },
+        customMetadata: {
+          agentName: this.name,
+          modelId,
+          title: brief.title,
+        },
+      });
+
+      this.sql`
+        INSERT INTO agent_songs (id, prompt, title, music_prompt, facts_json, audio_r2_key, content_type, model_id, output_format, generated_at, updated_at)
+        VALUES ('current', ${finalPrompt}, ${brief.title}, ${brief.musicPrompt}, ${JSON.stringify(brief.facts)}, ${audioR2Key}, ${contentType}, ${modelId}, ${outputFormat}, ${now}, ${now})
+        ON CONFLICT(id) DO UPDATE SET
+          prompt = excluded.prompt,
+          title = excluded.title,
+          music_prompt = excluded.music_prompt,
+          facts_json = excluded.facts_json,
+          audio_r2_key = excluded.audio_r2_key,
+          content_type = excluded.content_type,
+          model_id = excluded.model_id,
+          output_format = excluded.output_format,
+          generated_at = excluded.generated_at,
+          updated_at = excluded.updated_at
+      `;
+
+      this.recordTrace({
+        detail: { byteLength: audio.byteLength, facts: brief.facts, title: brief.title, usage: briefResult.usage },
+        durationMs: Date.now() - startedAt,
+        requestId,
+        spanType: "song",
+        status: "done",
+        title: "Agent song generated",
+      });
+      return this.getAgentSong();
+    } catch (error) {
+      this.recordTrace({
+        detail: error instanceof Error ? error.message : String(error),
+        durationMs: Date.now() - startedAt,
+        requestId,
+        spanType: "song",
+        status: "error",
+        title: "Agent song failed",
+      });
+      throw error;
+    }
+  }
+
   private reportTitleFromSpec(value: unknown): string | null {
     if (!value || typeof value !== "object") return null;
     const elements = (value as { elements?: unknown }).elements;
@@ -606,6 +798,38 @@ export class AgentThink extends Think<Env> {
       }
     }
     return null;
+  }
+
+  private parseSongBrief(text: string, fallbackPrompt: string) {
+    const parsed = parseJsonText(text) as unknown;
+    const record = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+    const facts = Array.isArray(record.facts)
+      ? record.facts.map((fact) => String(fact).trim()).filter(Boolean).slice(0, 8)
+      : [];
+    const title = typeof record.title === "string" && record.title.trim() ? record.title.trim().slice(0, 120) : "Data song";
+    const musicPrompt =
+      typeof record.musicPrompt === "string" && record.musicPrompt.trim()
+        ? record.musicPrompt.trim().slice(0, 4000)
+        : `${fallbackPrompt}\n\nWrite a concise song using the agent's data facts.`;
+    return { facts, musicPrompt, title };
+  }
+
+  private parseStringList(text: string | null) {
+    if (!text) return [];
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      return Array.isArray(parsed) ? parsed.map((value) => String(value)).filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private agentIdFromName() {
+    return this.name.startsWith("agent-") ? this.name.slice("agent-".length) : this.name;
+  }
+
+  private safeSongFilename(title: string | null) {
+    return (title || "agent-song").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "agent-song";
   }
 
   private listAgentDatabaseTables() {
@@ -894,6 +1118,7 @@ export class AgentThink extends Think<Env> {
     this.sql`DELETE FROM agent_sources`;
     this.sql`DELETE FROM agent_metadata`;
     this.sql`DELETE FROM agent_reports`;
+    this.sql`DELETE FROM agent_songs`;
     if (dropTraces) this.sql`DELETE FROM agent_traces`;
     this.clearChatMessages();
   }

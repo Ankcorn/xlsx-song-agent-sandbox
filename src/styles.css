@@ -897,6 +897,47 @@
     @apply gap-8;
   }
 
+  .song-length-field {
+    @apply md:w-36;
+  }
+
+  .song-artifact {
+    @apply grid gap-5;
+  }
+
+  .song-player-panel,
+  .song-details-grid > article {
+    @apply rounded-xl border border-zinc-200 bg-white p-5 shadow-sm;
+  }
+
+  .song-player-panel {
+    @apply grid gap-4 md:grid-cols-[auto_minmax(0,1fr)_minmax(260px,420px)_auto] md:items-center;
+  }
+
+  .song-icon {
+    @apply flex size-14 items-center justify-center rounded-lg bg-zinc-950 text-white;
+  }
+
+  .song-player-panel h2 {
+    @apply text-2xl font-semibold leading-tight;
+  }
+
+  .song-player-panel audio {
+    @apply w-full;
+  }
+
+  .song-details-grid {
+    @apply grid gap-5 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)];
+  }
+
+  .song-details-grid ul {
+    @apply m-0 grid gap-2 pl-5 text-sm leading-relaxed text-zinc-700;
+  }
+
+  .song-details-grid pre {
+    @apply mt-3 max-h-96 overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 p-4 text-xs leading-relaxed text-zinc-700 whitespace-pre-wrap break-words;
+  }
+
   .voice-input-control {
     @apply relative;
   }
