@@ -23,6 +23,7 @@ import {
   spreadsheetIdFromAgentName,
   stripCodeFence,
   traceDetail,
+  type AgentChatMessage,
   type AgentRequestPayload,
   type AgentTraceEvent,
   type Env,
@@ -797,6 +798,7 @@ function extractionTableSummary(extraction: CodemodeExtraction) {
 
 
 export class SheetsThink extends Think<Env> {
+  private chatSchemaReady = false;
   private fileSchemaReady = false;
   private traceSchemaReady = false;
   private turnStartTimes = new Map<string, number>();
@@ -906,6 +908,15 @@ export class SheetsThink extends Think<Env> {
       return json({ traces: this.listExtractionTraces() });
     }
 
+    if (url.pathname.endsWith("/chat-history") && request.method === "GET") {
+      return json({ messages: this.listChatMessages() });
+    }
+
+    if (url.pathname.endsWith("/chat-history") && request.method === "DELETE") {
+      this.clearChatMessages();
+      return json({ ok: true });
+    }
+
     if (url.pathname.endsWith("/analysis-tables") && request.method === "GET") {
       return json(this.listAnalysisTables());
     }
@@ -941,6 +952,8 @@ export class SheetsThink extends Think<Env> {
       const requestId = crypto.randomUUID();
       const startedAt = Date.now();
       const model = modelConfig(this.env, selectedModel);
+      const previousMessages = this.listChatMessages(8);
+      this.recordChatMessage("user", body.message, requestId);
       this.recordTrace({
         detail: { message: body.message, model },
         requestId,
@@ -952,7 +965,7 @@ export class SheetsThink extends Think<Env> {
       try {
         const result = await generateText({
           model: this.getModel(selectedModel),
-          prompt: body.message,
+          prompt: this.promptWithChatHistory(previousMessages, body.message),
           stopWhen: stepCountIs(6),
           system: this.getSystemPrompt(),
           temperature: 0.2,
@@ -967,6 +980,7 @@ export class SheetsThink extends Think<Env> {
           status: "done",
           title: "API request complete",
         });
+        this.recordChatMessage("assistant", result.text, requestId);
 
         return json({
           agentName: this.name,
@@ -1280,6 +1294,57 @@ export class SheetsThink extends Think<Env> {
     this.turnStartTimes.delete(turnKey);
     if (turnKey !== "__active_turn__") this.turnStartTimes.delete("__active_turn__");
     return Date.now() - startedAt;
+  }
+
+  private ensureChatSchema() {
+    if (this.chatSchemaReady) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS agent_chat_messages (
+        id TEXT PRIMARY KEY,
+        request_id TEXT,
+        role TEXT NOT NULL,
+        text TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      )
+    `;
+    this.sql`
+      CREATE INDEX IF NOT EXISTS idx_agent_chat_messages_created_at
+      ON agent_chat_messages (created_at ASC)
+    `;
+    this.chatSchemaReady = true;
+  }
+
+  private listChatMessages(limit = 80): AgentChatMessage[] {
+    this.ensureChatSchema();
+    return this.sql<AgentChatMessage>`
+      SELECT id, role, text, created_at
+      FROM (
+        SELECT id, role, text, created_at
+        FROM agent_chat_messages
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      )
+      ORDER BY created_at ASC
+    `;
+  }
+
+  private recordChatMessage(role: AgentChatMessage["role"], text: string, requestId: string) {
+    this.ensureChatSchema();
+    this.sql`
+      INSERT INTO agent_chat_messages (id, request_id, role, text)
+      VALUES (${crypto.randomUUID()}, ${requestId}, ${role}, ${text})
+    `;
+  }
+
+  private clearChatMessages() {
+    this.ensureChatSchema();
+    this.sql`DELETE FROM agent_chat_messages`;
+  }
+
+  private promptWithChatHistory(messages: AgentChatMessage[], message: string) {
+    if (messages.length === 0) return message;
+    const history = messages.map((entry) => `${entry.role.toUpperCase()}: ${entry.text}`).join("\n\n");
+    return `Recent conversation:\n${history}\n\nUSER: ${message}`;
   }
 
   private ensureTraceSchema() {
@@ -2226,6 +2291,7 @@ export class SheetsThink extends Think<Env> {
     this.sql`DELETE FROM document_analysis WHERE spreadsheet_id = ${spreadsheetId}`;
     this.sql`DELETE FROM agent_spreadsheet_files WHERE spreadsheet_id = ${spreadsheetId}`;
     this.sql`DELETE FROM agent_traces`;
+    this.clearChatMessages();
   }
 
   private listTraces(since?: string | null) {

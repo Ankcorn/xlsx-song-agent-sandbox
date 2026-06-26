@@ -95,6 +95,13 @@ export type AgentTraceEvent = {
   created_at: string;
 };
 
+export type AgentChatMessage = {
+  id: string;
+  role: "assistant" | "user";
+  text: string;
+  created_at: string;
+};
+
 export type AgentRequestPayload = {
   agentName?: unknown;
   message?: unknown;
@@ -2075,6 +2082,14 @@ export default {
       return sendLibraryAgentRequest(request, env, agentRequestMatch[1]);
     }
 
+    const agentChatHistoryMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/chat-history$/);
+    if (agentChatHistoryMatch && (request.method === "GET" || request.method === "DELETE")) {
+      const agent = await getLibraryAgentRow(env, agentChatHistoryMatch[1]);
+      if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+      const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
+      return stub.fetch("https://agent.local/chat-history", { method: request.method });
+    }
+
     const agentTablesMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/tables$/);
     if (agentTablesMatch && request.method === "GET") {
       const agent = await getLibraryAgentRow(env, agentTablesMatch[1]);
@@ -2157,6 +2172,14 @@ export default {
     const spreadsheetAgentRequestMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/agent-request$/);
     if (spreadsheetAgentRequestMatch && request.method === "POST") {
       return sendSpreadsheetAgentRequest(request, env, spreadsheetAgentRequestMatch[1]);
+    }
+
+    const spreadsheetChatHistoryMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/chat-history$/);
+    if (spreadsheetChatHistoryMatch && (request.method === "GET" || request.method === "DELETE")) {
+      const spreadsheet = await getSpreadsheetRow(env, spreadsheetChatHistoryMatch[1]);
+      if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+      const stub = env.SheetsThink.get(env.SheetsThink.idFromName(spreadsheet.agent_name));
+      return stub.fetch("https://agent.local/chat-history", { method: request.method });
     }
 
     const spreadsheetRetryExtractionMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/retry-extraction$/);

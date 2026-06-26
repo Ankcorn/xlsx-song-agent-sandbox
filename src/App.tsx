@@ -119,6 +119,15 @@ type AgentTraceResponse = {
   traces: AgentTrace[];
 };
 
+type AgentChatHistoryResponse = {
+  messages: Array<{
+    id: string;
+    role: "assistant" | "user";
+    text: string;
+    created_at: string;
+  }>;
+};
+
 type AgentTraceMessage = {
   type: "agent_trace";
   trace: AgentTrace;
@@ -1381,6 +1390,19 @@ function ChatSurface({
 
   useEffect(() => {
     let isMounted = true;
+    fetchJson<AgentChatHistoryResponse>(`/api/spreadsheets/${spreadsheet.id}/chat-history`)
+      .then((data) => {
+        if (!isMounted) return;
+        setRenderedMessages(data.messages.map((message) => ({ id: message.id, role: message.role, text: message.text })));
+      })
+      .catch(() => undefined);
+    return () => {
+      isMounted = false;
+    };
+  }, [spreadsheet.id]);
+
+  useEffect(() => {
+    let isMounted = true;
 
     fetchJson<AgentTraceResponse>(`/api/spreadsheets/${spreadsheet.id}/traces`)
       .then((data) => {
@@ -1550,12 +1572,13 @@ function ChatSurface({
     }
   }
 
-  function clearChat() {
+  async function clearChat() {
     if (isBusy) return;
     setRenderedMessages([]);
     setLatestChatRun(null);
     setShowEvidence(false);
     setInput("");
+    await fetch(`/api/spreadsheets/${spreadsheet.id}/chat-history`, { method: "DELETE" }).catch(() => undefined);
   }
 
   async function retryExtraction() {
@@ -2359,6 +2382,19 @@ function AgentChatPage() {
   const [showEvidence, setShowEvidence] = useState(false);
 
   useEffect(() => {
+    let isMounted = true;
+    fetchJson<AgentChatHistoryResponse>(`/api/agents/${agentId}/chat-history`)
+      .then((data) => {
+        if (!isMounted) return;
+        setRenderedMessages(data.messages.map((message) => ({ id: message.id, role: message.role, text: message.text })));
+      })
+      .catch(() => undefined);
+    return () => {
+      isMounted = false;
+    };
+  }, [agentId]);
+
+  useEffect(() => {
     if (activeView !== "sqlite" || !agentRecord || analysisTables) return;
     setIsViewerLoading(true);
     fetchJson<AnalysisTablesResponse>(`/api/agents/${agentId}/tables`)
@@ -2462,11 +2498,12 @@ function AgentChatPage() {
     }
   }
 
-  function clearChat() {
+  async function clearChat() {
     setRenderedMessages([]);
     setLatestChatRun(null);
     setShowEvidence(false);
     setInput("Summarize the attached sheets.");
+    await fetch(`/api/agents/${agentId}/chat-history`, { method: "DELETE" }).catch(() => undefined);
   }
 
   async function downloadExtractionTrace() {

@@ -13,6 +13,7 @@ import {
   providerModel,
   requestedModelEntry,
   safeTraceDetail,
+  type AgentChatMessage,
   type AgentInitializationPayload,
   type AgentRequestPayload,
   type AgentTraceEvent,
@@ -23,6 +24,7 @@ import {
 
 export class AgentThink extends Think<Env> {
   private agentSchemaReady = false;
+  private chatSchemaReady = false;
   private traceSchemaReady = false;
   private turnStartTimes = new Map<string, number>();
 
@@ -154,6 +156,13 @@ export class AgentThink extends Think<Env> {
       this.deleteLibraryAgentData();
       return json({ ok: true });
     }
+    if (url.pathname.endsWith("/chat-history") && request.method === "GET") {
+      return json({ messages: this.listChatMessages() });
+    }
+    if (url.pathname.endsWith("/chat-history") && request.method === "DELETE") {
+      this.clearChatMessages();
+      return json({ ok: true });
+    }
     if (url.pathname.endsWith("/api-request") && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as AgentRequestPayload;
       if (typeof body.message !== "string" || !body.message.trim()) {
@@ -168,11 +177,13 @@ export class AgentThink extends Think<Env> {
       const requestId = crypto.randomUUID();
       const startedAt = Date.now();
       const model = modelConfig(this.env, selectedModel);
+      const previousMessages = this.listChatMessages(8);
+      this.recordChatMessage("user", body.message, requestId);
       this.recordTrace({ detail: { message: body.message, model }, requestId, spanType: "api", status: "running", title: "API request received" });
       try {
         const result = await generateText({
           model: this.getModel(selectedModel),
-          prompt: body.message,
+          prompt: this.promptWithChatHistory(previousMessages, body.message),
           stopWhen: stepCountIs(8),
           system: this.getSystemPrompt(),
           temperature: 0.2,
@@ -186,6 +197,7 @@ export class AgentThink extends Think<Env> {
           status: "done",
           title: "API request complete",
         });
+        this.recordChatMessage("assistant", result.text, requestId);
         return json({ agentName: this.name, finishReason: result.finishReason, model, requestId, response: result.text, usage: result.usage });
       } catch (error) {
         this.recordTrace({
@@ -253,6 +265,54 @@ export class AgentThink extends Think<Env> {
       title: "Agent turn failed",
     });
     return error;
+  }
+
+  private ensureChatSchema() {
+    if (this.chatSchemaReady) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS agent_chat_messages (
+        id TEXT PRIMARY KEY,
+        request_id TEXT,
+        role TEXT NOT NULL,
+        text TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      )
+    `;
+    this.sql`CREATE INDEX IF NOT EXISTS idx_agent_chat_messages_created_at ON agent_chat_messages (created_at ASC)`;
+    this.chatSchemaReady = true;
+  }
+
+  private listChatMessages(limit = 80): AgentChatMessage[] {
+    this.ensureChatSchema();
+    return this.sql<AgentChatMessage>`
+      SELECT id, role, text, created_at
+      FROM (
+        SELECT id, role, text, created_at
+        FROM agent_chat_messages
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      )
+      ORDER BY created_at ASC
+    `;
+  }
+
+  private recordChatMessage(role: AgentChatMessage["role"], text: string, requestId: string) {
+    this.ensureChatSchema();
+    this.sql`
+      INSERT INTO agent_chat_messages (id, request_id, role, text)
+      VALUES (${crypto.randomUUID()}, ${requestId}, ${role}, ${text})
+    `;
+  }
+
+  private clearChatMessages() {
+    this.ensureChatSchema();
+    this.sql`DELETE FROM agent_chat_messages`;
+  }
+
+  private promptWithChatHistory(messages: AgentChatMessage[], message: string) {
+    if (messages.length === 0) return message;
+    const history = messages.map((entry) => `${entry.role.toUpperCase()}: ${entry.text}`).join("\n\n");
+    return `Recent conversation:\n${history}\n\nUSER: ${message}`;
   }
 
   private ensureAgentSchema() {
@@ -692,6 +752,7 @@ export class AgentThink extends Think<Env> {
     this.sql`DELETE FROM agent_sources`;
     this.sql`DELETE FROM agent_metadata`;
     if (dropTraces) this.sql`DELETE FROM agent_traces`;
+    this.clearChatMessages();
   }
 
   private tableColumns(tableName: string) {
