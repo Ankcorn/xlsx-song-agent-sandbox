@@ -1320,7 +1320,7 @@ function RootLayout() {
         <nav className="app-nav">
           <Link to="/" className="brand">
             <FileSpreadsheet size={22} />
-            <span>XLSX Song</span>
+            <span>Common Knowledge</span>
           </Link>
           <div className="nav-actions">
             <Link to="/ask" className="nav-button">
