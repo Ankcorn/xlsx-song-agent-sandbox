@@ -63,8 +63,14 @@ const { registry } = defineRegistry(agentReportCatalog, {
     Stack: shadcnComponents.Stack,
     Grid: shadcnComponents.Grid,
     Card: shadcnComponents.Card,
-    Heading: shadcnComponents.Heading,
-    Text: shadcnComponents.Text,
+    Heading: (componentProps) => {
+      if (!componentProps.props.text?.trim()) return <></>;
+      return shadcnComponents.Heading(componentProps);
+    },
+    Text: (componentProps) => {
+      if (!componentProps.props.text?.trim()) return <></>;
+      return shadcnComponents.Text(componentProps);
+    },
     Badge: shadcnComponents.Badge,
     Alert: shadcnComponents.Alert,
     Separator: shadcnComponents.Separator,

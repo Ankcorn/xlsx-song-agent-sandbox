@@ -566,7 +566,7 @@
   }
 
   .message.assistant {
-    @apply w-fit max-w-[min(100%,72rem)] self-start p-5;
+    @apply w-fit max-w-[min(100%,64rem)] self-start p-5;
   }
 
   .message span {
@@ -578,7 +578,7 @@
   }
 
   .json-render-message {
-    @apply grid w-full min-w-0 gap-5;
+    @apply grid w-full min-w-0 gap-3;
   }
 
   .json-render-loading {
@@ -594,7 +594,7 @@
   }
 
   .llm-report {
-    @apply grid w-full min-w-0 gap-5 text-zinc-900;
+    @apply grid w-full min-w-0 gap-4 text-zinc-900;
   }
 
   .llm-report > * {
@@ -611,8 +611,24 @@
     @apply text-pretty leading-relaxed;
   }
 
+  .llm-report [data-slot="card"] {
+    @apply gap-3 rounded-lg py-4 shadow-none;
+  }
+
+  .llm-report [data-slot="card-header"] {
+    @apply gap-1 px-4;
+  }
+
+  .llm-report [data-slot="card-content"] {
+    @apply px-4;
+  }
+
+  .llm-report [data-slot="alert"] {
+    @apply rounded-lg px-3 py-2;
+  }
+
   .llm-stat-grid {
-    @apply grid gap-4 sm:grid-cols-2 xl:grid-cols-4;
+    @apply grid items-start gap-3 sm:grid-cols-2 xl:grid-cols-3;
   }
 
   .llm-stat-card,
@@ -623,7 +639,7 @@
   }
 
   .llm-stat-card {
-    @apply grid gap-3 p-4;
+    @apply grid gap-2 rounded-lg p-3;
   }
 
   .llm-stat-card-header {
@@ -631,7 +647,7 @@
   }
 
   .llm-stat-card-header span {
-    @apply text-sm font-medium leading-snug text-zinc-500;
+    @apply text-xs font-semibold uppercase leading-snug tracking-wide text-zinc-500;
   }
 
   .llm-stat-delta {
@@ -639,11 +655,11 @@
   }
 
   .llm-stat-card strong {
-    @apply block text-2xl font-semibold leading-none text-zinc-950;
+    @apply block break-words text-xl font-semibold leading-tight text-zinc-950;
   }
 
   .llm-stat-card p {
-    @apply text-sm leading-relaxed text-zinc-500;
+    @apply text-xs leading-relaxed text-zinc-500;
   }
 
   .llm-bar-chart,
