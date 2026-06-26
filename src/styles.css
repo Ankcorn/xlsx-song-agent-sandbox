@@ -331,6 +331,10 @@
     @apply grid grid-cols-[auto_auto] items-center gap-x-2 gap-y-1 rounded-lg bg-zinc-100 px-4 py-3 text-right;
   }
 
+  .upload-summary-actions {
+    @apply flex flex-wrap items-center justify-end gap-2;
+  }
+
   .upload-progress-stats strong {
     @apply text-lg font-semibold leading-none text-zinc-950;
   }
@@ -1251,6 +1255,10 @@
 
     .upload-progress-stats {
       @apply grid-cols-6 text-left;
+    }
+
+    .upload-summary-actions {
+      @apply justify-start;
     }
 
     .upload-trace-list header,

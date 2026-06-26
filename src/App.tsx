@@ -949,6 +949,17 @@ function UploadPage() {
   const erroredTraceCount = uploadTraces.filter((trace) => trace.status === "error").length;
   const totalTraceDuration = uploadTraces.reduce((total, trace) => total + (trace.duration_ms ?? 0), 0);
 
+  function downloadUploadTrace() {
+    downloadJsonFile(`${safeDownloadName(file?.name ?? "spreadsheet")}-upload-trace.json`, {
+      agentName: uploadAgentName,
+      category: category.trim() || "Uncategorised",
+      filename: file?.name ?? null,
+      preExtract,
+      spreadsheetId: uploadSpreadsheetId,
+      traces: uploadTraces,
+    });
+  }
+
   return (
     <section className={`content-band upload-page ${hasUploadStarted ? "is-processing" : "narrow"}`}>
       <Link to="/" className="back-link">
@@ -1018,13 +1029,25 @@ function UploadPage() {
                 {category.trim() || "Uncategorised"} · {preExtract ? "Pre-extracting into an agent SQLite database" : "Storing file"}
               </p>
             </div>
-            <div className="upload-progress-stats">
-              <strong>{uploadTraces.length}</strong>
-              <span>steps</span>
-              <strong>{completedTraceCount}</strong>
-              <span>done</span>
-              <strong>{runningTraceCount}</strong>
-              <span>running</span>
+            <div className="upload-summary-actions">
+              <div className="upload-progress-stats">
+                <strong>{uploadTraces.length}</strong>
+                <span>steps</span>
+                <strong>{completedTraceCount}</strong>
+                <span>done</span>
+                <strong>{runningTraceCount}</strong>
+                <span>running</span>
+              </div>
+              <Button
+                disabled={uploadTraces.length === 0}
+                icon={<Download size={16} />}
+                size="sm"
+                type="button"
+                variant="secondary"
+                onClick={downloadUploadTrace}
+              >
+                Download trace
+              </Button>
             </div>
           </div>
 
@@ -1433,6 +1456,10 @@ function ChatSurface({
     });
   }
 
+  function downloadOriginalFile() {
+    window.location.href = `/api/spreadsheets/${spreadsheet.id}/file`;
+  }
+
   const showChatChrome = activeView === "chat";
 
   return (
@@ -1476,6 +1503,15 @@ function ChatSurface({
             ]}
             onValueChange={(value) => setActiveView(value as AgentView)}
           />
+          <Button
+            icon={<Download size={16} />}
+            size="sm"
+            type="button"
+            variant="secondary"
+            onClick={downloadOriginalFile}
+          >
+            Original file
+          </Button>
           {activeView === "chat" ? (
             <Button
               disabled={isBusy || renderedMessages.length === 0}

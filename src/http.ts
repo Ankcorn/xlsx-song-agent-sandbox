@@ -437,6 +437,11 @@ function revisionR2KeyForSpreadsheet(id: string, revisionNumber: number, filenam
   return `spreadsheets/${id}/revisions/${revisionNumber}/${safeFilename(filename)}`;
 }
 
+function contentDispositionFilename(filename: string) {
+  const fallback = safeFilename(filename) || "spreadsheet";
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
 function isSpreadsheetFile(file: File) {
   const name = file.name.toLowerCase();
   return (
@@ -1312,6 +1317,21 @@ async function retrySpreadsheetExtraction(env: Env, spreadsheetId: string) {
   }
 }
 
+async function downloadSpreadsheetFile(env: Env, spreadsheetId: string) {
+  const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
+  if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
+  if (!spreadsheet.r2_key) return json({ error: "Spreadsheet file is not available in R2." }, { status: 409 });
+
+  const object = await env.SPREADSHEETS.get(spreadsheet.r2_key);
+  if (!object) return json({ error: "Spreadsheet file was not found in R2." }, { status: 404 });
+
+  const headers = new Headers();
+  headers.set("Content-Type", spreadsheet.content_type || object.httpMetadata?.contentType || "application/octet-stream");
+  headers.set("Content-Length", String(object.size));
+  headers.set("Content-Disposition", contentDispositionFilename(spreadsheet.filename));
+  return new Response(object.body, { headers });
+}
+
 async function deleteSpreadsheet(env: Env, spreadsheetId: string) {
   const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
   if (!spreadsheet) return json({ error: "Spreadsheet not found" }, { status: 404 });
@@ -1455,6 +1475,11 @@ export default {
     const spreadsheetRetryExtractionMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/retry-extraction$/);
     if (spreadsheetRetryExtractionMatch && request.method === "POST") {
       return retrySpreadsheetExtraction(env, spreadsheetRetryExtractionMatch[1]);
+    }
+
+    const spreadsheetFileMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/file$/);
+    if (spreadsheetFileMatch && request.method === "GET") {
+      return downloadSpreadsheetFile(env, spreadsheetFileMatch[1]);
     }
 
     const spreadsheetRevisionsMatch = url.pathname.match(/^\/api\/spreadsheets\/([^/]+)\/revisions$/);
