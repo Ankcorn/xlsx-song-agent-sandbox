@@ -74,7 +74,15 @@ type CodemodeExtractorProfile = {
   title: string;
 };
 
+type CodemodeReview = {
+  issues?: unknown;
+  notes: string;
+  score: number;
+};
+
 type SpreadsheetAccessMode = "auto" | "raw" | "sqlite";
+
+const CODEMODE_REVIEW_RETRY_THRESHOLD = 50;
 
 function requestedAccessMode(value: unknown): SpreadsheetAccessMode {
   if (value === undefined || value === null || value === "") return "auto";
@@ -2098,6 +2106,7 @@ export class SheetsThink extends Think<Env> {
     });
     const design = await this.designCodemodeExtraction(filename, profile, extractor);
     let extraction: CodemodeExtraction | undefined;
+    let review: CodemodeReview | undefined;
     let previousProblem: string | undefined;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const code = await this.generateCodemodeExtractionCode(filename, profile, design, extractor, previousProblem);
@@ -2167,11 +2176,36 @@ export class SheetsThink extends Think<Env> {
         if (attempt < 3) continue;
         throw new Error(coverageProblem);
       }
+      const candidateReview = await this.reviewCodemodeExtraction(filename, profile, design, candidate);
+      if (candidateReview.score < CODEMODE_REVIEW_RETRY_THRESHOLD) {
+        previousProblem = [
+          `Extraction quality review scored ${candidateReview.score}/100, below the retry threshold of ${CODEMODE_REVIEW_RETRY_THRESHOLD}/100.`,
+          candidateReview.notes ? `Reviewer notes: ${candidateReview.notes}` : "",
+          candidateReview.issues !== undefined ? `Reviewer issues: ${JSON.stringify(candidateReview.issues)}` : "",
+          "Regenerate the extractor to fix the coverage issues before emitting the final JSON.",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        this.recordTrace({
+          detail: traceDetail("The reviewer scored this extraction below the retry threshold, so codemode will retry with the review feedback.", {
+            problem: previousProblem,
+            score: candidateReview.score,
+            tables: extractionTableSummary(candidate),
+          }),
+          spanType: "ingestion",
+          status: "error",
+          title: "Extraction quality below threshold",
+        });
+        if (attempt < 3) continue;
+        throw new Error(previousProblem);
+      }
       extraction = candidate;
+      review = candidateReview;
       break;
     }
 
     if (!extraction) throw new Error(previousProblem || "Codemode extraction failed coverage checks.");
+    if (!review) throw new Error("Codemode extraction was not reviewed.");
     const parseStartedAt = Date.now();
     this.recordTrace({
       detail: traceDetail("Validating and normalizing the generated JSON before writing SQLite tables."),
@@ -2179,7 +2213,6 @@ export class SheetsThink extends Think<Env> {
       status: "running",
       title: "Normalizing extraction output",
     });
-    const review = await this.reviewCodemodeExtraction(filename, profile, design, extraction);
     extraction.metadata.confidence_score = review.score;
     extraction.metadata.extraction_notes = [extraction.metadata.extraction_notes, review.notes].filter(Boolean).join("\n\n");
     this.recordTrace({
@@ -2647,7 +2680,7 @@ export class SheetsThink extends Think<Env> {
     return null;
   }
 
-  private async reviewCodemodeExtraction(filename: string, profile: unknown, design: unknown, extraction: CodemodeExtraction) {
+  private async reviewCodemodeExtraction(filename: string, profile: unknown, design: unknown, extraction: CodemodeExtraction): Promise<CodemodeReview> {
     const prompt = [
       "You are codemode's extraction reviewer.",
       "Review whether the generated SQLite extraction is domain-specific, complete, well-metadataed, and source-referenceable.",
@@ -2691,7 +2724,7 @@ export class SheetsThink extends Think<Env> {
           status: "done",
           title: "Extraction quality reviewed",
         });
-        return { notes, score };
+        return { issues: parsed.issues, notes, score };
       } catch (error) {
         lastError = error;
         this.recordTrace({
