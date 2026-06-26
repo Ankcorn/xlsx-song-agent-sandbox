@@ -8,6 +8,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  useLocation,
   useNavigate,
   useParams,
 } from "@tanstack/react-router";
@@ -25,6 +26,7 @@ import {
   Layers3,
   PanelRightClose,
   PanelRightOpen,
+  Mic,
   Plus,
   Send,
   Search,
@@ -32,6 +34,8 @@ import {
   Table2,
   Trash2,
   Upload,
+  Volume2,
+  X,
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -101,6 +105,21 @@ type LibraryAgentListResponse = {
 type LibraryAgentResponse = {
   agent: LibraryAgent;
   sheets: Spreadsheet[];
+};
+
+type AgentReport = {
+  generatedAt: string;
+  id: string;
+  isStale?: boolean;
+  latestDataUpdatedAt?: string | null;
+  prompt: string;
+  spec: unknown;
+  title: string | null;
+  updatedAt: string;
+};
+
+type AgentReportResponse = {
+  report: AgentReport | null;
 };
 
 type AgentTrace = {
@@ -178,9 +197,25 @@ type AgentView = "chat" | "sqlite" | "raw" | "revisions";
 type MultiAgentView = "chat" | "sqlite" | "sources";
 
 type RenderedMessage = {
+  benchmarkRun?: BenchmarkRun;
+  benchmarkSaved?: boolean;
+  benchmarkSaving?: boolean;
   id: string;
   role: string;
   text: string;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onend: (() => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
+  onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+  start: () => void;
+  stop: () => void;
 };
 
 type AgentRequestResponse = {
@@ -404,6 +439,139 @@ function tracePayload(trace: AgentTrace) {
   return JSON.stringify(parsed, null, 2);
 }
 
+function tracePayloadSections(trace: AgentTrace) {
+  const parsed = parseTraceDetail(trace.detail);
+  if (parsed === null) return { compact: [] as Array<[string, string]>, raw: "No payload captured for this event.", sections: [] as Array<[string, unknown]> };
+  const detail = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : null;
+  const snippet = detail && typeof detail.snippet === "string" ? parseTraceSnippet(detail.snippet) : undefined;
+  const source = snippet && typeof snippet === "object" && snippet !== null ? (snippet as Record<string, unknown>) : detail;
+  const compact: Array<[string, string]> = [];
+  const sections: Array<[string, unknown]> = [];
+
+  if (detail && typeof detail.summary === "string") compact.push(["Summary", detail.summary]);
+  if (typeof parsed === "string") compact.push(["Message", parsed]);
+
+  if (source) {
+    for (const [key, value] of Object.entries(source)) {
+      if (key === "summary" || key === "snippet") continue;
+      if (value === null || value === undefined) continue;
+      if (isTraceCodeKey(key) && typeof value === "string") {
+        sections.push([key, value]);
+        continue;
+      }
+      if (typeof value === "object") sections.push([key, value]);
+      else compact.push([humanizeTraceKey(key), String(value)]);
+    }
+  } else if (snippet !== undefined) {
+    if (typeof snippet === "string" && looksLikePythonCode(snippet)) sections.push(["code", snippet]);
+    else compact.push(["Snippet", typeof snippet === "string" ? snippet : JSON.stringify(snippet, null, 2)]);
+  }
+
+  if (detail && source !== detail) {
+    for (const [key, value] of Object.entries(detail)) {
+      if (key === "summary" || key === "snippet" || value === null || value === undefined) continue;
+      if (isTraceCodeKey(key) && typeof value === "string") {
+        sections.push([key, value]);
+        continue;
+      }
+      if (typeof value === "object") sections.push([key, value]);
+      else if (!compact.some(([label]) => label === humanizeTraceKey(key))) compact.push([humanizeTraceKey(key), String(value)]);
+    }
+  }
+
+  return {
+    compact: compact.slice(0, 12),
+    raw: typeof parsed === "string" ? parsed : JSON.stringify(parsed, null, 2),
+    sections: prioritizeTraceSections(sections),
+  };
+}
+
+function parseTraceSnippet(snippet: string) {
+  try {
+    return JSON.parse(snippet) as unknown;
+  } catch {
+    return snippet;
+  }
+}
+
+function isTraceCodeKey(key: string) {
+  return ["code", "python", "script", "generated_code", "extractor_code"].includes(key.toLowerCase());
+}
+
+function looksLikePythonCode(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed || !trimmed.includes("\n")) return false;
+  return (
+    /^import\s+/m.test(trimmed) ||
+    /^from\s+\S+\s+import\s+/m.test(trimmed) ||
+    /^def\s+\w+\(/m.test(trimmed) ||
+    /^class\s+\w+/m.test(trimmed) ||
+    /json\.dumps\(/.test(trimmed) ||
+    /SPREADSHEET_PATH/.test(trimmed)
+  );
+}
+
+function prioritizeTraceSections(sections: Array<[string, unknown]>) {
+  const bulky = new Set(["profile", "sheets", "sample", "useful_sample", "preview"]);
+  return [...sections].sort(([left], [right]) => {
+    const leftCode = isTraceCodeKey(left) ? -1 : 0;
+    const rightCode = isTraceCodeKey(right) ? -1 : 0;
+    if (leftCode !== rightCode) return leftCode - rightCode;
+    return Number(bulky.has(left)) - Number(bulky.has(right));
+  });
+}
+
+function TracePayloadView({ trace }: { trace: AgentTrace }) {
+  const payload = tracePayloadSections(trace);
+  return (
+    <div className="trace-payload-panel">
+      <div className="trace-payload-header">
+        <h3>Payload</h3>
+        <span>Structured</span>
+      </div>
+      <div className="trace-payload-body">
+        {payload.compact.length > 0 ? (
+          <dl className="trace-payload-summary">
+            {payload.compact.map(([label, value]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{value}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+        {payload.sections.length > 0 ? (
+          <div className="trace-payload-sections">
+            {payload.sections.map(([key, value], index) => (
+              <details key={`${key}-${index}`} open={index === 0 && !isBulkyTraceSection(key)}>
+                <summary>
+                  <span>{humanizeTraceKey(key)}</span>
+                  <small>{traceSectionSummary(value)}</small>
+                </summary>
+                <pre className={isTraceCodeKey(key) && typeof value === "string" ? "trace-payload-code" : undefined}>
+                  {isTraceCodeKey(key) && typeof value === "string" ? value : JSON.stringify(value, null, 2)}
+                </pre>
+              </details>
+            ))}
+          </div>
+        ) : null}
+        {payload.compact.length === 0 && payload.sections.length === 0 ? <pre>{payload.raw}</pre> : null}
+      </div>
+    </div>
+  );
+}
+
+function isBulkyTraceSection(key: string) {
+  return ["profile", "sheets", "sample", "useful_sample", "preview"].includes(key);
+}
+
+function traceSectionSummary(value: unknown) {
+  if (typeof value === "string" && looksLikePythonCode(value)) return `${value.split("\n").length} lines`;
+  if (Array.isArray(value)) return `${value.length} items`;
+  if (value && typeof value === "object") return `${Object.keys(value).length} keys`;
+  return typeof value;
+}
+
 function humanizeTraceKey(value: string) {
   return value.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
@@ -503,19 +671,200 @@ function parseJsonRenderSpec(text: string): Spec | null {
   return null;
 }
 
+function isJsonRenderSpec(value: unknown): value is Spec {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "root" in value &&
+    "elements" in value &&
+    typeof (value as { root?: unknown }).root === "string" &&
+    typeof (value as { elements?: unknown }).elements === "object"
+  );
+}
+
 function isJsonRenderStreamCandidate(text: string) {
   const trimmed = text.trimStart();
   return trimmed.startsWith("{") || trimmed.startsWith("```json") || trimmed.startsWith("```");
 }
 
-function ChatMessage({ isStreaming = false, message }: { isStreaming?: boolean; message: RenderedMessage }) {
+function textFromUnknown(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function compactSpeechText(text: string) {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[{}[\]"`]/g, " ")
+    .replace(/\b(root|elements|props|component|children|metadata|payload|json)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function collectSpecSpeechFacts(value: unknown, facts: string[] = []) {
+  if (facts.length >= 10 || value === null || value === undefined) return facts;
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectSpecSpeechFacts(item, facts);
+    return facts;
+  }
+
+  if (typeof value !== "object") return facts;
+  const record = value as Record<string, unknown>;
+  const component = textFromUnknown(record.component ?? record.type);
+  const props = typeof record.props === "object" && record.props !== null ? (record.props as Record<string, unknown>) : record;
+
+  if (/^(Heading|Text|Alert)$/i.test(component)) {
+    const text = textFromUnknown(props.text ?? props.title ?? props.description);
+    if (text) facts.push(text);
+  }
+
+  if (/StatGrid/i.test(component) && Array.isArray(props.items)) {
+    for (const item of props.items.slice(0, 4)) {
+      if (typeof item !== "object" || item === null) continue;
+      const stat = item as Record<string, unknown>;
+      const label = textFromUnknown(stat.label);
+      const valueText = textFromUnknown(stat.value);
+      const delta = textFromUnknown(stat.delta);
+      if (label && valueText) facts.push(`${label}: ${valueText}${delta ? `, ${delta}` : ""}`);
+    }
+  }
+
+  if (/BarChart/i.test(component) && Array.isArray(props.data)) {
+    const title = textFromUnknown(props.title);
+    const top = props.data
+      .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
+      .slice(0, 3)
+      .map((item) => {
+        const label = textFromUnknown(item.label);
+        const numberValue = typeof item.value === "number" ? item.value.toLocaleString() : textFromUnknown(item.value);
+        return label && numberValue ? `${label} ${numberValue}` : "";
+      })
+      .filter(Boolean);
+    if (top.length) facts.push(`${title || "Top values"}: ${top.join("; ")}`);
+  }
+
+  if (/DataTable/i.test(component) && Array.isArray(props.rows)) {
+    const rows = props.rows.filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null).slice(0, 3);
+    const rowFacts = rows
+      .map((row) =>
+        Object.entries(row)
+          .filter(([, item]) => typeof item === "string" || typeof item === "number")
+          .slice(0, 3)
+          .map(([key, item]) => `${key}: ${item}`)
+          .join(", "),
+      )
+      .filter(Boolean);
+    if (rowFacts.length) facts.push(`Table highlights: ${rowFacts.join("; ")}`);
+  }
+
+  for (const item of Object.values(record)) collectSpecSpeechFacts(item, facts);
+  return facts;
+}
+
+function speechSummaryForMessage(text: string) {
+  const spec = parseJsonRenderSpec(text);
+  if (spec) {
+    const facts = Array.from(new Set(collectSpecSpeechFacts(spec).map(compactSpeechText).filter(Boolean)));
+    const summary = facts.slice(0, 5).join(". ").slice(0, 700);
+    if (summary) return summary;
+  }
+
+  const compact = compactSpeechText(text);
+  const sentences = compact
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence && !/^(assistant|user|metadata|payload)$/i.test(sentence));
+  const factHeavy = sentences.filter((sentence) => /\d|%|£|\$|€|count|total|average|highest|lowest|top|bottom|increase|decrease/i.test(sentence));
+  return (factHeavy.length ? factHeavy : sentences).slice(0, 3).join(" ").slice(0, 600) || compact.slice(0, 600);
+}
+
+function ChatMessage({
+  isStreaming = false,
+  message,
+  onAddToBenchmark,
+}: {
+  isStreaming?: boolean;
+  message: RenderedMessage;
+  onAddToBenchmark?: (messageId: string) => void;
+}) {
   const spec = message.role === "assistant" ? parseJsonRenderSpec(message.text) : null;
   const isRenderingJson = message.role === "assistant" && isStreaming && !spec && isJsonRenderStreamCandidate(message.text);
+  const canBenchmark = message.role === "assistant" && Boolean(message.benchmarkRun) && !isStreaming;
+  const [speechError, setSpeechError] = useState<string | null>(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
+  const canSpeak = message.role === "assistant" && !isStreaming && message.text.trim().length > 0;
+
+  useEffect(() => {
+    return () => {
+      audioRef.current?.pause();
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    };
+  }, []);
+
+  async function speakMessage() {
+    if (!canSpeak || isSpeaking) return;
+    setSpeechError(null);
+    setIsSpeaking(true);
+
+    try {
+      audioRef.current?.pause();
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+
+      const response = await fetch("/api/speech", {
+        body: JSON.stringify({ text: speechSummaryForMessage(message.text) }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error || "Speech generation failed.");
+      }
+
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const audio = new Audio(objectUrl);
+      audioRef.current = audio;
+      objectUrlRef.current = objectUrl;
+      audio.onended = () => setIsSpeaking(false);
+      audio.onerror = () => {
+        setSpeechError("Could not play generated speech.");
+        setIsSpeaking(false);
+      };
+      await audio.play();
+    } catch (caught) {
+      setSpeechError(caught instanceof Error ? caught.message : "Speech generation failed.");
+      setIsSpeaking(false);
+    }
+  }
 
   return (
     <article className={`message ${message.role}`}>
-      <span>{message.role}</span>
-      {spec ? (
+      <div className="message-header">
+        <span>{message.role}</span>
+        {canSpeak ? (
+          <button
+            aria-label={isSpeaking ? "Playing speech" : "Play speech"}
+            className="speech-button"
+            disabled={isSpeaking}
+            title={isSpeaking ? "Playing speech" : "Play speech"}
+            type="button"
+            onClick={() => void speakMessage()}
+          >
+            {isSpeaking ? <Loader size="sm" /> : <Volume2 size={15} />}
+          </button>
+        ) : null}
+      </div>
+      {isStreaming && message.text === "Thinking..." ? (
+        <div className="json-render-loading">
+          <Loader size="sm" />
+          <div>
+            <strong>Thinking...</strong>
+          </div>
+        </div>
+      ) : spec ? (
         <div className="json-render-message">
           <JsonRenderReport spec={spec} />
         </div>
@@ -530,7 +879,114 @@ function ChatMessage({ isStreaming = false, message }: { isStreaming?: boolean; 
       ) : (
         <p>{message.text}</p>
       )}
+      {canBenchmark || canSpeak ? (
+        <div className="message-actions">
+          {canSpeak ? (
+            <Button
+              disabled={isSpeaking}
+              icon={isSpeaking ? <Loader size="sm" /> : <Volume2 size={15} />}
+              size="sm"
+              type="button"
+              variant="secondary"
+              onClick={() => void speakMessage()}
+            >
+              {isSpeaking ? "Speaking" : "Speak"}
+            </Button>
+          ) : null}
+          {canBenchmark ? (
+            <Button
+              disabled={message.benchmarkSaved || message.benchmarkSaving}
+              icon={<BarChart3 size={15} />}
+              loading={message.benchmarkSaving}
+              size="sm"
+              type="button"
+              variant={message.benchmarkSaved ? "secondary" : "primary"}
+              onClick={() => onAddToBenchmark?.(message.id)}
+            >
+              {message.benchmarkSaved ? "Added to benchmark" : "Add to benchmark"}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {speechError ? <p className="speech-error">{speechError}</p> : null}
     </article>
+  );
+}
+
+function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
+  if (typeof window === "undefined") return null;
+  const speechWindow = window as Window & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
+}
+
+function VoiceInputButton({
+  disabled,
+  onTranscript,
+  value,
+}: {
+  disabled?: boolean;
+  onTranscript: (value: string) => void;
+  value: string;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+
+  useEffect(() => {
+    return () => {
+      recognitionRef.current?.stop();
+    };
+  }, []);
+
+  function startListening() {
+    if (disabled || isListening) return;
+    const Recognition = getSpeechRecognitionConstructor();
+    if (!Recognition) {
+      setError("Voice input is not supported in this browser.");
+      return;
+    }
+
+    setError(null);
+    const recognition = new Recognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = navigator.language || "en-US";
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .flatMap((result) => Array.from(result).map((item) => item.transcript))
+        .join(" ")
+        .trim();
+      if (transcript) onTranscript([value.trim(), transcript].filter(Boolean).join(" "));
+    };
+    recognition.onerror = (event) => {
+      setError(event.error === "not-allowed" ? "Microphone permission was blocked." : "Voice input failed.");
+      setIsListening(false);
+    };
+    recognition.onend = () => setIsListening(false);
+    recognitionRef.current = recognition;
+    setIsListening(true);
+    recognition.start();
+  }
+
+  return (
+    <div className="voice-input-control">
+      <Button
+        aria-label={isListening ? "Listening for voice input" : "Start voice input"}
+        className={isListening ? "voice-input-button is-listening" : "voice-input-button"}
+        disabled={disabled}
+        icon={<Mic size={18} />}
+        loading={isListening}
+        shape="square"
+        title={isListening ? "Listening" : "Dictate message"}
+        type="button"
+        variant="secondary"
+        onClick={startListening}
+      />
+      {error ? <span>{error}</span> : null}
+    </div>
   );
 }
 
@@ -641,6 +1097,11 @@ async function updateBenchmarkRunQuality(runId: string, quality: number) {
   window.dispatchEvent(new CustomEvent("benchmark-runs-updated"));
 }
 
+async function deleteBenchmarkRun(runId: string) {
+  await fetchJson<{ ok: true }>(`/api/benchmarks/runs/${runId}`, { method: "DELETE" });
+  window.dispatchEvent(new CustomEvent("benchmark-runs-updated"));
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   const data = (await response.json().catch(() => ({}))) as T & { error?: string };
@@ -662,38 +1123,43 @@ async function waitForSpreadsheetExtraction(spreadsheetId: string) {
 }
 
 function RootLayout() {
+  const location = useLocation();
+  const isPublicReport = /^\/agents\/[^/]+\/report\/?$/.test(location.pathname);
   return (
-    <main className="page-shell">
-      <nav className="app-nav">
-        <Link to="/" className="brand">
-          <FileSpreadsheet size={22} />
-          <span>XLSX Song</span>
-        </Link>
-        <div className="nav-actions">
-          <Link to="/ask" className="nav-button">
-            <Search size={18} />
-            <span>Ask data</span>
+    <main className={isPublicReport ? "page-shell report-shell" : "page-shell"}>
+      {isPublicReport ? null : (
+        <nav className="app-nav">
+          <Link to="/" className="brand">
+            <FileSpreadsheet size={22} />
+            <span>XLSX Song</span>
           </Link>
-          <Link to="/upload" className="nav-button">
-            <Plus size={18} />
-            <span>Upload</span>
-          </Link>
-          <Link to="/agents" className="nav-button">
-            <Bot size={18} />
-            <span>Agents</span>
-          </Link>
-          <Link to="/benchmarks" className="nav-button">
-            <BarChart3 size={18} />
-            <span>Benchmarks</span>
-          </Link>
-        </div>
-      </nav>
+          <div className="nav-actions">
+            <Link to="/ask" className="nav-button">
+              <Search size={18} />
+              <span>Ask data</span>
+            </Link>
+            <Link to="/upload" className="nav-button">
+              <Plus size={18} />
+              <span>Upload</span>
+            </Link>
+            <Link to="/agents" className="nav-button">
+              <Bot size={18} />
+              <span>Agents</span>
+            </Link>
+            <Link to="/benchmarks" className="nav-button">
+              <BarChart3 size={18} />
+              <span>Benchmarks</span>
+            </Link>
+          </div>
+        </nav>
+      )}
       <Outlet />
     </main>
   );
 }
 
 function SpreadsheetListPage() {
+  const navigate = useNavigate();
   const [spreadsheets, setSpreadsheets] = useState<Spreadsheet[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -895,6 +1361,23 @@ function SpreadsheetListPage() {
                       {spreadsheet.error_message ? <p className="row-error">{spreadsheet.error_message}</p> : null}
                     </div>
                     <div className="row-actions">
+                      <Button
+                        aria-label={`View upload flow for ${spreadsheet.filename}`}
+                        icon={<History size={16} />}
+                        size="sm"
+                        type="button"
+                        variant="secondary"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          void navigate({
+                            params: { spreadsheetId: spreadsheet.id },
+                            to: "/spreadsheets/$spreadsheetId/upload-flow",
+                          });
+                        }}
+                      >
+                        Flow
+                      </Button>
                       {spreadsheet.status === "failed" ? (
                         <Button
                           className="retry-button"
@@ -1287,13 +1770,7 @@ function UploadPage() {
                       </div>
                     ))}
                   </dl>
-                  <div className="trace-payload-panel">
-                    <div className="trace-payload-header">
-                      <h3>Payload</h3>
-                      <span>JSON</span>
-                    </div>
-                    <pre>{tracePayload(selectedUploadTrace)}</pre>
-                  </div>
+                  <TracePayloadView trace={selectedUploadTrace} />
                 </>
               ) : (
                 <Empty
@@ -1312,11 +1789,225 @@ function UploadPage() {
   );
 }
 
+function SpreadsheetUploadFlowPage() {
+  const { spreadsheetId } = useParams({ from: "/spreadsheets/$spreadsheetId/upload-flow" });
+  const [spreadsheet, setSpreadsheet] = useState<Spreadsheet | null>(null);
+  const [traces, setTraces] = useState<AgentTrace[]>([]);
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadFlow() {
+      try {
+        const [spreadsheetData, traceData] = await Promise.all([
+          fetchJson<SpreadsheetResponse>(`/api/spreadsheets/${spreadsheetId}`),
+          fetchJson<AgentTraceResponse>(`/api/spreadsheets/${spreadsheetId}/extraction-trace`),
+        ]);
+        if (!isMounted) return;
+        setSpreadsheet(spreadsheetData.spreadsheet);
+        setTraces(traceData.traces);
+        setError(null);
+      } catch (caught) {
+        if (isMounted) setError(caught instanceof Error ? caught.message : "Could not load upload flow");
+      } finally {
+        if (isMounted) setIsLoading(false);
+      }
+    }
+
+    void loadFlow();
+    const interval = window.setInterval(() => {
+      if (spreadsheet?.status === "processing") void loadFlow();
+    }, 1500);
+    return () => {
+      isMounted = false;
+      window.clearInterval(interval);
+    };
+  }, [spreadsheetId, spreadsheet?.status]);
+
+  useEffect(() => {
+    if (traces.length === 0) {
+      setSelectedTraceId(null);
+      return;
+    }
+    setSelectedTraceId((current) => {
+      if (current && traces.some((trace) => trace.id === current)) return current;
+      return traces[traces.length - 1]?.id ?? null;
+    });
+  }, [traces]);
+
+  const selectedTrace = traces.find((trace) => trace.id === selectedTraceId) ?? traces[traces.length - 1] ?? null;
+  const completedTraceCount = traces.filter((trace) => trace.status === "done").length;
+  const runningTraceCount = traces.filter((trace) => trace.status === "running").length;
+  const erroredTraceCount = traces.filter((trace) => trace.status === "error").length;
+  const totalTraceDuration = traces.reduce((total, trace) => total + (trace.duration_ms ?? 0), 0);
+
+  function downloadFlowTrace() {
+    downloadJsonFile(`${safeDownloadName(spreadsheet?.filename ?? "spreadsheet")}-upload-flow.json`, {
+      agentName: spreadsheet?.agent_name ?? null,
+      category: spreadsheet?.category ?? null,
+      filename: spreadsheet?.filename ?? null,
+      preExtract: spreadsheet?.pre_extract !== 0,
+      spreadsheetId,
+      traces,
+    });
+  }
+
+  return (
+    <section className="content-band upload-page is-processing">
+      <Link to={spreadsheet ? "/spreadsheets/$spreadsheetId" : "/"} params={spreadsheet ? { spreadsheetId } : undefined} className="back-link">
+        <ArrowLeft size={18} />
+        <span>{spreadsheet ? "Spreadsheet" : "Spreadsheets"}</span>
+      </Link>
+
+      {isLoading ? (
+        <div className="status-line">
+          <Loader size="sm" />
+          <span>Loading upload flow</span>
+        </div>
+      ) : error ? (
+        <Banner variant="error" title="Could not load upload flow" description={error} />
+      ) : (
+        <section className="upload-processing">
+          <div className="upload-processing-summary">
+            <div>
+              <p className="eyebrow">Upload and extraction flow</p>
+              <h2>{spreadsheet?.filename ?? "Spreadsheet"}</h2>
+              <p>
+                {spreadsheet?.category || "Uncategorised"} · {spreadsheet ? extractionLabel(spreadsheet) : "Trace"} · {spreadsheet?.status ?? "ready"}
+              </p>
+            </div>
+            <div className="upload-summary-actions">
+              <div className="upload-progress-stats">
+                <strong>{traces.length}</strong>
+                <span>steps</span>
+                <strong>{completedTraceCount}</strong>
+                <span>done</span>
+                <strong>{runningTraceCount}</strong>
+                <span>running</span>
+              </div>
+              <Button
+                disabled={traces.length === 0}
+                icon={<Download size={16} />}
+                size="sm"
+                type="button"
+                variant="secondary"
+                onClick={downloadFlowTrace}
+              >
+                Download trace
+              </Button>
+            </div>
+          </div>
+
+          <div className="upload-trace-workbench">
+            <section className="upload-trace-list" aria-label="Upload and analysis events">
+              <header>
+                <div>
+                  <p className="eyebrow">Saved trace</p>
+                  <h2>{selectedTrace?.title ?? "No trace events yet"}</h2>
+                </div>
+                <div className="trace-metrics" aria-label="Trace summary">
+                  <span><strong>{traces.length}</strong> events</span>
+                  <span><strong>{completedTraceCount}</strong> done</span>
+                  <span><strong>{runningTraceCount}</strong> running</span>
+                  {erroredTraceCount > 0 ? <span className="error"><strong>{erroredTraceCount}</strong> errors</span> : null}
+                  <span><strong>{formatDuration(totalTraceDuration)}</strong> captured</span>
+                </div>
+              </header>
+
+              <div className="upload-trace-table-wrap">
+                <table className="upload-trace-table">
+                  <thead>
+                    <tr>
+                      <th>Step</th>
+                      <th>Status</th>
+                      <th>Event</th>
+                      <th>Started</th>
+                      <th>Duration</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {traces.map((trace) => {
+                      const isSelected = selectedTrace?.id === trace.id;
+                      const summary = traceSummary(trace.detail);
+                      return (
+                        <tr
+                          aria-selected={isSelected}
+                          className={`${trace.status} ${isSelected ? "is-selected" : ""}`}
+                          key={trace.id}
+                          onClick={() => setSelectedTraceId(trace.id)}
+                        >
+                          <td>
+                            <span className="trace-step-index">{trace.step_number ?? "-"}</span>
+                            <span>{trace.span_type}</span>
+                          </td>
+                          <td>
+                            <span className={`trace-status-pill ${trace.status}`}>
+                              <span className="trace-dot" />
+                              {trace.status}
+                            </span>
+                          </td>
+                          <td>
+                            <strong>{trace.title}</strong>
+                            {summary ? <small>{summary}</small> : null}
+                          </td>
+                          <td>{formatTraceTime(trace.created_at)}</td>
+                          <td>{formatDuration(trace.duration_ms)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside className="upload-trace-detail">
+              {selectedTrace ? (
+                <>
+                  <header>
+                    <div>
+                      <p className="eyebrow">Selected event</p>
+                      <h2>{selectedTrace.title}</h2>
+                    </div>
+                    <span className={`trace-status-pill ${selectedTrace.status}`}>
+                      <span className="trace-dot" />
+                      {selectedTrace.status}
+                    </span>
+                  </header>
+                  <dl className="trace-detail-grid">
+                    {traceKeyValues(selectedTrace).map(([label, value]) => (
+                      <div key={label}>
+                        <dt>{label}</dt>
+                        <dd>{value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                  <TracePayloadView trace={selectedTrace} />
+                </>
+              ) : (
+                <Empty
+                  className="viewer-empty"
+                  icon={<Clock size={32} />}
+                  size="sm"
+                  title="No upload flow captured"
+                  description="This sheet does not have saved upload or extraction events yet."
+                />
+              )}
+            </aside>
+          </div>
+        </section>
+      )}
+    </section>
+  );
+}
+
 function SpreadsheetChatPage() {
   const { spreadsheetId } = useParams({ from: "/spreadsheets/$spreadsheetId" });
   const [spreadsheet, setSpreadsheet] = useState<Spreadsheet | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [input, setInput] = useState("Run a simple Python script for this spreadsheet.");
+  const [input, setInput] = useState("");
 
   useEffect(() => {
     setSpreadsheet(null);
@@ -1396,6 +2087,7 @@ function ChatSurface({
   const [renderedMessages, setRenderedMessages] = useState<RenderedMessage[]>([]);
   const [latestChatRun, setLatestChatRun] = useState<BenchmarkRun | null>(null);
   const [showEvidence, setShowEvidence] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -1409,6 +2101,11 @@ function ChatSurface({
       isMounted = false;
     };
   }, [spreadsheet.id]);
+
+  useEffect(() => {
+    if (activeView !== "chat") return;
+    messagesEndRef.current?.scrollIntoView({ block: "end" });
+  }, [activeView, isBusy, latestChatRun, renderedMessages.length, showEvidence]);
 
   useEffect(() => {
     let isMounted = true;
@@ -1529,7 +2226,8 @@ function ChatSurface({
 
     const totalStarted = performance.now();
     const userMessage: RenderedMessage = { id: crypto.randomUUID(), role: "user", text };
-    setRenderedMessages((current) => [...current, userMessage]);
+    const thinkingId = crypto.randomUUID();
+    setRenderedMessages((current) => [...current, userMessage, { id: thinkingId, role: "assistant", text: "Thinking..." }]);
     setInput("");
     setIsSending(true);
     setShowEvidence(false);
@@ -1550,34 +2248,38 @@ function ChatSurface({
         totalSeconds: (performance.now() - totalStarted) / 1000,
         uploadSeconds: null,
       });
-      const savedRun = await saveBenchmarkRun(run);
-      setLatestChatRun(savedRun);
-      setRenderedMessages((current) => [...current, { id: answer.requestId, role: "assistant", text: answer.response }]);
+      setLatestChatRun(run);
+      setRenderedMessages((current) =>
+        current.map((message) =>
+          message.id === thinkingId ? { benchmarkRun: run, id: answer.requestId, role: "assistant", text: answer.response } : message,
+        ),
+      );
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Agent request failed";
-      const failedRun: BenchmarkRun = {
-        id: crypto.randomUUID(),
-        answer: "",
-        answerSeconds: 0,
-        error: message,
-        evidence: null,
-        inputTokens: null,
-        modelName: null,
-        modelProvider: null,
-        outputTokens: null,
-        prompt: text,
-        quality: null,
-        spreadsheetFilename: spreadsheet.filename,
-        spreadsheetId: spreadsheet.id,
-        timestamp: new Date().toISOString(),
-        totalSeconds: (performance.now() - totalStarted) / 1000,
-        totalTokens: null,
-        uploadSeconds: null,
-      };
-      await saveBenchmarkRun(failedRun).catch(() => undefined);
-      setRenderedMessages((current) => [...current, { id: failedRun.id, role: "assistant", text: message }]);
+      setRenderedMessages((current) =>
+        current.map((item) => (item.id === thinkingId ? { id: thinkingId, role: "assistant", text: message } : item)),
+      );
     } finally {
       setIsSending(false);
+    }
+  }
+
+  async function addMessageToBenchmark(messageId: string) {
+    const message = renderedMessages.find((item) => item.id === messageId);
+    if (!message?.benchmarkRun || message.benchmarkSaved || message.benchmarkSaving) return;
+
+    setRenderedMessages((current) => current.map((item) => (item.id === messageId ? { ...item, benchmarkSaving: true } : item)));
+    try {
+      const savedRun = await saveBenchmarkRun(message.benchmarkRun);
+      setLatestChatRun(savedRun);
+      setRenderedMessages((current) =>
+        current.map((item) =>
+          item.id === messageId ? { ...item, benchmarkRun: savedRun, benchmarkSaved: true, benchmarkSaving: false } : item,
+        ),
+      );
+    } catch (caught) {
+      setViewerError(caught instanceof Error ? caught.message : "Could not add benchmark run");
+      setRenderedMessages((current) => current.map((item) => (item.id === messageId ? { ...item, benchmarkSaving: false } : item)));
     }
   }
 
@@ -1688,7 +2390,23 @@ function ChatSurface({
             <span>{isRetryingExtraction ? "Retrying extraction" : "Retry extraction"}</span>
           </Button>
         ) : null}
+      </header>
+
+      <div className="chat-stickybar">
+        <div className="chat-sticky-title">
+          <FileSpreadsheet size={18} />
+          <span>{spreadsheet.filename}</span>
+          <small>{extractionLabel(spreadsheet)}</small>
+        </div>
         <div className="chat-toolbar">
+          <Link
+            className="nav-button"
+            params={{ spreadsheetId: spreadsheet.id }}
+            to="/spreadsheets/$spreadsheetId/upload-flow"
+          >
+            <History size={16} />
+            <span>Flow</span>
+          </Link>
           <Tabs
             className="view-tabs"
             size="sm"
@@ -1736,7 +2454,7 @@ function ChatSurface({
             </>
           ) : null}
         </div>
-      </header>
+      </div>
 
       <div className={`chat-main ${showChatChrome ? "" : "inspect-mode"} ${isTraceCollapsed ? "trace-collapsed" : ""}`}>
         <div className="chat-workspace">
@@ -1760,10 +2478,12 @@ function ChatSurface({
                     key={message.id}
                     isStreaming={isBusy && message.role === "assistant" && index === renderedMessages.length - 1}
                     message={message}
+                    onAddToBenchmark={addMessageToBenchmark}
                   />
                 ))
               )}
               {showEvidence && latestChatRun ? <EvidenceViewer run={latestChatRun} /> : null}
+              <div ref={messagesEndRef} />
             </div>
           ) : activeView === "sqlite" ? (
             <SQLiteViewer
@@ -1794,8 +2514,8 @@ function ChatSurface({
                 aria-label="Message"
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
-                placeholder="Ask this spreadsheet agent..."
               />
+              <VoiceInputButton disabled={isBusy} value={input} onTranscript={setInput} />
               <Button
                 aria-label="Send message"
                 className="icon-button"
@@ -1953,6 +2673,12 @@ function SQLiteViewer({
 }
 
 function MetadataPanel({ metadata }: { metadata: Record<string, unknown> }) {
+  const summaryEntries = ([
+    ["Category", metadata.category],
+    ["Domain", metadata.domain],
+    ["Period", metadata.time_period],
+    ["Geography", metadata.geography],
+  ] satisfies Array<[string, unknown]>).filter(([, value]) => hasMetadataValue(value));
   const entries = ([
     ["Title", metadata.title],
     ["Description", metadata.description],
@@ -1972,15 +2698,30 @@ function MetadataPanel({ metadata }: { metadata: Record<string, unknown> }) {
   if (entries.length === 0) return null;
 
   return (
-    <section className="metadata-panel">
-      <header>
-        <div>
-          <p className="eyebrow">Metadata</p>
-          <h2>{String(metadata.description || metadata.title || "Document metadata")}</h2>
+    <details className="metadata-panel">
+      <summary>
+        <div className="metadata-summary-main">
+          <div>
+            <p className="eyebrow">Metadata</p>
+            <h2>{String(metadata.title || metadata.description || "Document metadata")}</h2>
+          </div>
+          {summaryEntries.length > 0 ? (
+            <dl className="metadata-summary-list">
+              {summaryEntries.map(([label, value]) => (
+                <div key={label}>
+                  <dt>{label}</dt>
+                  <dd>{metadataText(value)}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : null}
         </div>
-        {hasMetadataValue(metadata.confidence_score) ? <span className="score-pill">{String(metadata.confidence_score)}/100</span> : null}
-      </header>
-      <dl>
+        <div className="metadata-summary-actions">
+          {hasMetadataValue(metadata.confidence_score) ? <span className="score-pill">{String(metadata.confidence_score)}/100</span> : null}
+          <span className="metadata-toggle-label">Details</span>
+        </div>
+      </summary>
+      <dl className="metadata-detail-list">
         {entries.map(([label, value]) => (
           <div key={label}>
             <dt>{label}</dt>
@@ -1988,7 +2729,7 @@ function MetadataPanel({ metadata }: { metadata: Record<string, unknown> }) {
           </div>
         ))}
       </dl>
-    </section>
+    </details>
   );
 }
 
@@ -2346,12 +3087,14 @@ function CreateAgentPage() {
 
 function AgentChatPage() {
   const { agentId } = useParams({ from: "/agents/$agentId" });
+  const navigate = useNavigate();
   const [agentRecord, setAgentRecord] = useState<LibraryAgent | null>(null);
   const [sheets, setSheets] = useState<Spreadsheet[]>([]);
   const [traces, setTraces] = useState<AgentTrace[]>([]);
   const [activeView, setActiveView] = useState<MultiAgentView>("chat");
-  const [input, setInput] = useState("Summarize the attached sheets.");
+  const [input, setInput] = useState("");
   const [renderedMessages, setRenderedMessages] = useState<RenderedMessage[]>([]);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const [analysisTables, setAnalysisTables] = useState<AnalysisTablesResponse | null>(null);
   const [selectedTable, setSelectedTable] = useState<string | null>(null);
   const [tableData, setTableData] = useState<AnalysisTableResponse | null>(null);
@@ -2385,6 +3128,7 @@ function AgentChatPage() {
     },
   });
   const [isSending, setIsSending] = useState(false);
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const isBusy = isSending;
   const wasBusyRef = useRef(false);
   const [latestChatRun, setLatestChatRun] = useState<BenchmarkRun | null>(null);
@@ -2402,6 +3146,11 @@ function AgentChatPage() {
       isMounted = false;
     };
   }, [agentId]);
+
+  useEffect(() => {
+    if (activeView !== "chat") return;
+    messagesEndRef.current?.scrollIntoView({ block: "end" });
+  }, [activeView, isBusy, latestChatRun, renderedMessages.length, showEvidence]);
 
   useEffect(() => {
     if (activeView !== "sqlite" || !agentRecord || analysisTables) return;
@@ -2439,7 +3188,8 @@ function AgentChatPage() {
     if (!text || isBusy || !agentRecord) return;
 
     const totalStarted = performance.now();
-    setRenderedMessages((current) => [...current, { id: crypto.randomUUID(), role: "user", text }]);
+    const thinkingId = crypto.randomUUID();
+    setRenderedMessages((current) => [...current, { id: crypto.randomUUID(), role: "user", text }, { id: thinkingId, role: "assistant", text: "Thinking..." }]);
     setInput("");
     setIsSending(true);
     setShowEvidence(false);
@@ -2476,34 +3226,38 @@ function AgentChatPage() {
         totalSeconds: (performance.now() - totalStarted) / 1000,
         uploadSeconds: null,
       });
-      const savedRun = await saveBenchmarkRun(run);
-      setLatestChatRun(savedRun);
-      setRenderedMessages((current) => [...current, { id: answer.requestId, role: "assistant", text: answer.response }]);
+      setLatestChatRun(run);
+      setRenderedMessages((current) =>
+        current.map((message) =>
+          message.id === thinkingId ? { benchmarkRun: run, id: answer.requestId, role: "assistant", text: answer.response } : message,
+        ),
+      );
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Agent request failed";
-      const failedRun: BenchmarkRun = {
-        id: crypto.randomUUID(),
-        answer: "",
-        answerSeconds: 0,
-        error: message,
-        evidence: null,
-        inputTokens: null,
-        modelName: null,
-        modelProvider: null,
-        outputTokens: null,
-        prompt: text,
-        quality: null,
-        spreadsheetFilename: agentRecord.name,
-        spreadsheetId: agentId,
-        timestamp: new Date().toISOString(),
-        totalSeconds: (performance.now() - totalStarted) / 1000,
-        totalTokens: null,
-        uploadSeconds: null,
-      };
-      await saveBenchmarkRun(failedRun).catch(() => undefined);
-      setRenderedMessages((current) => [...current, { id: failedRun.id, role: "assistant", text: message }]);
+      setRenderedMessages((current) =>
+        current.map((item) => (item.id === thinkingId ? { id: thinkingId, role: "assistant", text: message } : item)),
+      );
     } finally {
       setIsSending(false);
+    }
+  }
+
+  async function addMessageToBenchmark(messageId: string) {
+    const message = renderedMessages.find((item) => item.id === messageId);
+    if (!message?.benchmarkRun || message.benchmarkSaved || message.benchmarkSaving) return;
+
+    setRenderedMessages((current) => current.map((item) => (item.id === messageId ? { ...item, benchmarkSaving: true } : item)));
+    try {
+      const savedRun = await saveBenchmarkRun(message.benchmarkRun);
+      setLatestChatRun(savedRun);
+      setRenderedMessages((current) =>
+        current.map((item) =>
+          item.id === messageId ? { ...item, benchmarkRun: savedRun, benchmarkSaved: true, benchmarkSaving: false } : item,
+        ),
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not add benchmark run");
+      setRenderedMessages((current) => current.map((item) => (item.id === messageId ? { ...item, benchmarkSaving: false } : item)));
     }
   }
 
@@ -2511,7 +3265,7 @@ function AgentChatPage() {
     setRenderedMessages([]);
     setLatestChatRun(null);
     setShowEvidence(false);
-    setInput("Summarize the attached sheets.");
+    setInput("");
     await fetch(`/api/agents/${agentId}/chat-history`, { method: "DELETE" }).catch(() => undefined);
   }
 
@@ -2526,6 +3280,24 @@ function AgentChatPage() {
     });
   }
 
+  async function generateReport() {
+    if (isGeneratingReport) return;
+    setIsGeneratingReport(true);
+    setError(null);
+    try {
+      await fetchJson<AgentReportResponse>(`/api/agents/${agentId}/report`, {
+        body: JSON.stringify({}),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      await navigate({ params: { agentId }, to: "/agents/$agentId/report" });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not generate report");
+    } finally {
+      setIsGeneratingReport(false);
+    }
+  }
+
   if (error) return <section className="content-band"><Link to="/agents" className="back-link"><ArrowLeft size={18} /><span>Agents</span></Link><Banner variant="error" title="Could not load agent" description={error} /></section>;
   if (!agentRecord) return <section className="content-band"><div className="status-line"><Loader size="sm" /><span>Loading agent</span></div></section>;
 
@@ -2538,7 +3310,33 @@ function AgentChatPage() {
           <h1>{agentRecord.name}</h1>
           <p className="muted">{sheets.length} attached sheets · {agentRecord.description || "No description"}</p>
         </div>
+      </header>
+      <div className="chat-stickybar">
+        <div className="chat-sticky-title">
+          <Bot size={18} />
+          <span>{agentRecord.name}</span>
+          <small>{sheets.length} attached {sheets.length === 1 ? "sheet" : "sheets"}</small>
+        </div>
         <div className="chat-toolbar">
+          <Link className="nav-button" params={{ agentId }} to="/agents/$agentId/report">
+            <FileText size={16} />
+            <span>Report</span>
+          </Link>
+          <Link className="nav-button" params={{ agentId }} to="/agents/$agentId/report/edit">
+            <FileText size={16} />
+            <span>Edit report</span>
+          </Link>
+          <Button
+            disabled={isGeneratingReport}
+            icon={<FileText size={16} />}
+            loading={isGeneratingReport}
+            size="sm"
+            type="button"
+            variant="primary"
+            onClick={() => void generateReport()}
+          >
+            Generate report
+          </Button>
           <Tabs
             className="view-tabs"
             size="sm"
@@ -2576,7 +3374,7 @@ function AgentChatPage() {
             </>
           ) : null}
         </div>
-      </header>
+      </div>
       <div className="chat-main">
         <div className="chat-workspace">
           {activeView === "chat" ? (
@@ -2592,12 +3390,15 @@ function AgentChatPage() {
                     key={message.id}
                     isStreaming={isBusy && message.role === "assistant" && index === renderedMessages.length - 1}
                     message={message}
+                    onAddToBenchmark={addMessageToBenchmark}
                   />
                 ))}
                 {showEvidence && latestChatRun ? <EvidenceViewer run={latestChatRun} /> : null}
+                <div ref={messagesEndRef} />
               </div>
               <form className="composer" onSubmit={submitMessage}>
-                <Input aria-label="Message" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask this multi-sheet agent..." />
+                <Input aria-label="Message" value={input} onChange={(event) => setInput(event.target.value)} />
+                <VoiceInputButton disabled={isBusy} value={input} onTranscript={setInput} />
                 <Button aria-label="Send message" className="icon-button" loading={isBusy} shape="square" type="submit" variant="primary" disabled={isBusy || !input.trim()}><Send size={18} /></Button>
               </form>
             </>
@@ -2692,9 +3493,168 @@ function AgentSourcesView({ sheets }: { sheets: Spreadsheet[] }) {
   );
 }
 
+function AgentReportPage() {
+  const { agentId } = useParams({ from: "/agents/$agentId/report" });
+  return <AgentReportView agentId={agentId} mode="public" />;
+}
+
+function AgentReportEditPage() {
+  const { agentId } = useParams({ from: "/agents/$agentId/report/edit" });
+  return <AgentReportView agentId={agentId} mode="edit" />;
+}
+
+function AgentReportView({ agentId, mode }: { agentId: string; mode: "edit" | "public" }) {
+  const [agentRecord, setAgentRecord] = useState<LibraryAgent | null>(null);
+  const [report, setReport] = useState<AgentReport | null>(null);
+  const [prompt, setPrompt] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    async function loadReport() {
+      try {
+        const [agentData, reportData] = await Promise.all([
+          fetchJson<LibraryAgentResponse>(`/api/agents/${agentId}`),
+          fetchJson<AgentReportResponse>(`/api/agents/${agentId}/report`),
+        ]);
+        if (!isMounted) return;
+        setAgentRecord(agentData.agent);
+        setReport(reportData.report);
+        setPrompt(reportData.report?.prompt ?? "");
+        setError(null);
+      } catch (caught) {
+        if (isMounted) setError(caught instanceof Error ? caught.message : "Could not load report");
+      } finally {
+        if (isMounted) setIsLoading(false);
+      }
+    }
+    void loadReport();
+    return () => {
+      isMounted = false;
+    };
+  }, [agentId]);
+
+  async function generateReport(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    if (isGenerating) return;
+    setIsGenerating(true);
+    setError(null);
+    try {
+      const data = await fetchJson<AgentReportResponse>(`/api/agents/${agentId}/report`, {
+        body: JSON.stringify({ prompt }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      setReport(data.report);
+      if (data.report?.prompt) setPrompt(data.report.prompt);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not generate report");
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
+  const reportSpec = isJsonRenderSpec(report?.spec) ? report.spec : null;
+  const isPublic = mode === "public";
+
+  return (
+    <section className={isPublic ? "report-public-page" : "content-band report-page"}>
+      {isPublic ? null : (
+        <Link to="/agents/$agentId" params={{ agentId }} className="back-link">
+          <ArrowLeft size={18} />
+          <span>Agent</span>
+        </Link>
+      )}
+      <header className={isPublic ? "report-public-header" : "section-header"}>
+        <div>
+          <p className="eyebrow">{isPublic ? "XLSX Song report" : "Agent report"}</p>
+          <h1>{report?.title || agentRecord?.name || "Report"}</h1>
+          <p className="muted">
+            {agentRecord?.name ?? agentId}
+            {report?.generatedAt ? ` · generated ${formatDateTime(report.generatedAt)}` : ""}
+          </p>
+        </div>
+        {isPublic ? null : (
+          <div className="report-actions">
+            <Link className="nav-button" params={{ agentId }} to="/agents/$agentId/report">
+              <FileText size={16} />
+              <span>View share page</span>
+            </Link>
+            <Button
+              disabled={isGenerating}
+              icon={<FileText size={18} />}
+              loading={isGenerating}
+              type="button"
+              variant="primary"
+              onClick={() => void generateReport()}
+            >
+              {report ? "Regenerate" : "Generate report"}
+            </Button>
+          </div>
+        )}
+      </header>
+
+      {report?.isStale ? (
+        <Banner
+          title="New agent data available"
+          description={`This report was generated before the agent data was last updated${
+            report.latestDataUpdatedAt ? ` (${formatDateTime(report.latestDataUpdatedAt)})` : ""
+          }. Regenerate it from the edit report page to include the latest data.`}
+        />
+      ) : null}
+
+      {isPublic ? null : (
+        <form className="report-prompt" onSubmit={generateReport}>
+          <label className="form-field">
+            <span>Steer the report</span>
+            <Input
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+            />
+          </label>
+          <Button disabled={isGenerating} loading={isGenerating} type="submit" variant="secondary">
+            Regenerate with prompt
+          </Button>
+        </form>
+      )}
+
+      {error ? <Banner variant="error" title="Report error" description={error} /> : null}
+      {isLoading ? (
+        <div className="status-line">
+          <Loader size="sm" />
+          <span>Loading report</span>
+        </div>
+      ) : reportSpec ? (
+        <article className={isPublic ? "report-public-artifact" : "report-artifact"}>
+          <JsonRenderReport spec={reportSpec} />
+        </article>
+      ) : (
+        <Empty
+          className="empty-list"
+          icon={<FileText size={42} />}
+          title="No report generated yet"
+          description={
+            isPublic
+              ? "This agent does not have a published report yet."
+              : "Generate a report from this agent's current working database."
+          }
+          contents={isPublic ? undefined : (
+            <Button disabled={isGenerating} loading={isGenerating} type="button" variant="primary" onClick={() => void generateReport()}>
+              Generate report
+            </Button>
+          )}
+        />
+      )}
+    </section>
+  );
+}
+
 function AskDataPage() {
   const [input, setInput] = useState("Find a relevant public dataset and answer my question.");
   const [messages, setMessages] = useState<RenderedMessage[]>([]);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const [latestRun, setLatestRun] = useState<BenchmarkRun | null>(null);
   const [steps, setSteps] = useState<DatasetAgentStep[]>([]);
   const [showEvidence, setShowEvidence] = useState(false);
@@ -2761,13 +3721,18 @@ function AskDataPage() {
     };
   }, [pendingAnswers]);
 
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ block: "end" });
+  }, [isRunning, latestRun, messages.length, showEvidence, steps.length]);
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = input.trim();
     if (!text || isRunning) return;
 
     const totalStarted = performance.now();
-    setMessages((current) => [...current, { id: crypto.randomUUID(), role: "user", text }]);
+    const thinkingId = crypto.randomUUID();
+    setMessages((current) => [...current, { id: crypto.randomUUID(), role: "user", text }, { id: thinkingId, role: "assistant", text: "Thinking..." }]);
     setInput("");
     setSteps([{ status: "running", title: "Starting dataset search" }]);
     setIsRunning(true);
@@ -2809,11 +3774,15 @@ function AskDataPage() {
       });
       const savedRun = await saveBenchmarkRun(run);
       setLatestRun(savedRun);
-      setMessages((current) => [...current, { id: answer.requestId, role: "assistant", text: answer.response }]);
+      setMessages((current) =>
+        current.map((message) => (message.id === thinkingId ? { id: answer.requestId, role: "assistant", text: answer.response } : message)),
+      );
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "Dataset agent request failed";
       setSteps((current) => [...current, { detail: message, status: "error", title: "Dataset search failed" }]);
-      setMessages((current) => [...current, { id: crypto.randomUUID(), role: "assistant", text: message }]);
+      setMessages((current) =>
+        current.map((item) => (item.id === thinkingId ? { id: thinkingId, role: "assistant", text: message } : item)),
+      );
     } finally {
       setIsRunning(false);
     }
@@ -2858,6 +3827,7 @@ function AskDataPage() {
               <Empty className="empty-state" icon={<Search size={38} />} size="sm" title="Dataset agent ready" description="Ask a question and I will find the best local or data.gov.uk dataset." />
             ) : messages.map((message) => <ChatMessage key={message.id} isStreaming={false} message={message} />)}
             {showEvidence && latestRun ? <EvidenceViewer run={latestRun} /> : null}
+            <div ref={messagesEndRef} />
           </div>
           <form className="composer" onSubmit={submit}>
             <Input aria-label="Message" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask for data..." />
@@ -2941,6 +3911,17 @@ function BenchmarkDashboardPage() {
     }
   }
 
+  async function deleteRun(runId: string) {
+    const previousRuns = runs;
+    setRuns((current) => current.filter((run) => run.id !== runId));
+    try {
+      await deleteBenchmarkRun(runId);
+    } catch (caught) {
+      setRuns(previousRuns);
+      setError(caught instanceof Error ? caught.message : "Could not delete benchmark run");
+    }
+  }
+
   return (
     <section className="benchmark-page analytics-page">
       <aside className="analytics-sidebar">
@@ -2984,7 +3965,7 @@ function BenchmarkDashboardPage() {
 
         {error ? <Banner variant="error" title="Benchmark log error" description={error} /> : null}
         {isLoading ? <div className="status-line"><Loader size="sm" /><span>Loading benchmark runs</span></div> : null}
-        <BenchmarkResults runs={runs} setQuality={setQuality} />
+        <BenchmarkResults deleteRun={deleteRun} runs={runs} setQuality={setQuality} />
       </main>
     </section>
   );
@@ -3060,7 +4041,17 @@ function MetricCard({ icon, label, value }: { icon: ReactNode; label: string; va
   );
 }
 
-function BenchmarkResults({ runs, setQuality }: { runs: BenchmarkRun[]; setQuality: (runId: string, quality: number) => void }) {
+function BenchmarkResults({
+  deleteRun,
+  runs,
+  setQuality,
+}: {
+  deleteRun: (runId: string) => void;
+  runs: BenchmarkRun[];
+  setQuality: (runId: string, quality: number) => void;
+}) {
+  const [reviewRun, setReviewRun] = useState<BenchmarkRun | null>(null);
+
   if (runs.length === 0) {
     return (
       <div className="benchmark-empty">
@@ -3071,54 +4062,165 @@ function BenchmarkResults({ runs, setQuality }: { runs: BenchmarkRun[]; setQuali
   }
 
   return (
-    <div className="benchmark-table-wrap">
-      <table className="benchmark-table">
-        <thead>
-          <tr>
-            <th>Run</th>
-            <th>Prompt</th>
-            <th>Model</th>
-            <th>Speed</th>
-            <th>Tokens</th>
-            <th>Quality</th>
-            <th>Answer</th>
-          </tr>
-        </thead>
-        <tbody>
-          {runs.map((run) => (
-            <tr className={run.error ? "failed" : ""} key={run.id}>
-              <td>
-                <strong>{new Date(run.timestamp).toLocaleTimeString()}</strong>
-                <span>{run.spreadsheetFilename ?? run.spreadsheetId}</span>
-              </td>
-              <td>{run.prompt}</td>
-              <td>
-                <strong>{run.modelProvider ?? "n/a"}</strong>
-                <span>{run.modelName ?? "n/a"}</span>
-              </td>
-              <td>
-                <strong>{formatSeconds(run.answerSeconds)}</strong>
-                <span>total {formatSeconds(run.totalSeconds)}</span>
-                {run.uploadSeconds !== null ? <span>upload {formatSeconds(run.uploadSeconds)}</span> : null}
-              </td>
-              <td>
-                <strong>{formatNumber(run.totalTokens)}</strong>
-                <span>in {formatNumber(run.inputTokens)} · out {formatNumber(run.outputTokens)}</span>
-              </td>
-              <td>
-                <div className="quality-buttons" aria-label="Answer quality rating">
-                  {[1, 2, 3, 4, 5].map((score) => (
-                    <button className={run.quality === score ? "active" : ""} key={score} type="button" onClick={() => setQuality(run.id, score)}>
-                      {score}
-                    </button>
-                  ))}
-                </div>
-              </td>
-              <td>{run.error ? <span className="row-error">{run.error}</span> : run.answer}</td>
+    <>
+      <div className="benchmark-table-wrap">
+        <table className="benchmark-table">
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Prompt</th>
+              <th>Model</th>
+              <th>Speed</th>
+              <th>Tokens</th>
+              <th>Quality</th>
+              <th>Answer</th>
+              <th>Actions</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {runs.map((run) => (
+              <tr className={run.error ? "failed" : ""} key={run.id}>
+                <td>
+                  <strong>{new Date(run.timestamp).toLocaleTimeString()}</strong>
+                  <span>{run.spreadsheetFilename ?? run.spreadsheetId}</span>
+                </td>
+                <td>{run.prompt}</td>
+                <td>
+                  <strong>{run.modelProvider ?? "n/a"}</strong>
+                  <span>{run.modelName ?? "n/a"}</span>
+                </td>
+                <td>
+                  <strong>{formatSeconds(run.answerSeconds)}</strong>
+                  <span>total {formatSeconds(run.totalSeconds)}</span>
+                  {run.uploadSeconds !== null ? <span>upload {formatSeconds(run.uploadSeconds)}</span> : null}
+                </td>
+                <td>
+                  <strong>{formatNumber(run.totalTokens)}</strong>
+                  <span>in {formatNumber(run.inputTokens)} · out {formatNumber(run.outputTokens)}</span>
+                </td>
+                <td>
+                  <QualityButtons quality={run.quality} runId={run.id} setQuality={setQuality} />
+                </td>
+                <td>
+                  {run.error ? (
+                    <span className="row-error">{run.error}</span>
+                  ) : (
+                    <div className="benchmark-answer-preview">
+                      <p>{benchmarkAnswerPreview(run.answer)}</p>
+                      <Button icon={<Search size={15} />} size="sm" type="button" variant="secondary" onClick={() => setReviewRun(run)}>
+                        Open
+                      </Button>
+                    </div>
+                  )}
+                </td>
+                <td>
+                  <div className="benchmark-row-actions">
+                    <Button icon={<Search size={15} />} size="sm" type="button" variant="secondary" onClick={() => setReviewRun(run)}>
+                      Review
+                    </Button>
+                    <Button
+                      aria-label="Delete benchmark run"
+                      icon={<Trash2 size={15} />}
+                      size="sm"
+                      type="button"
+                      variant="secondary-destructive"
+                      onClick={() => deleteRun(run.id)}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {reviewRun ? <BenchmarkReviewModal run={reviewRun} setQuality={setQuality} onClose={() => setReviewRun(null)} /> : null}
+    </>
+  );
+}
+
+function QualityButtons({
+  quality,
+  runId,
+  setQuality,
+}: {
+  quality: number | null;
+  runId: string;
+  setQuality: (runId: string, quality: number) => void;
+}) {
+  return (
+    <div className="quality-buttons" aria-label="Answer quality rating">
+      {[1, 2, 3, 4, 5].map((score) => (
+        <button className={quality === score ? "active" : ""} key={score} type="button" onClick={() => setQuality(runId, score)}>
+          {score}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function benchmarkAnswerPreview(answer: string) {
+  const spec = parseJsonRenderSpec(answer);
+  if (spec) return "Interactive JSON UI response";
+  const trimmed = answer.trim();
+  return trimmed.length > 180 ? `${trimmed.slice(0, 180)}...` : trimmed || "No answer text";
+}
+
+function BenchmarkReviewModal({
+  onClose,
+  run,
+  setQuality,
+}: {
+  onClose: () => void;
+  run: BenchmarkRun;
+  setQuality: (runId: string, quality: number) => void;
+}) {
+  const spec = run.error ? null : parseJsonRenderSpec(run.answer);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="benchmark-modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="benchmark-modal" role="dialog" aria-modal="true" aria-labelledby="benchmark-review-title" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="benchmark-modal-header">
+          <div>
+            <p className="eyebrow">Benchmark review</p>
+            <h2 id="benchmark-review-title">{run.spreadsheetFilename ?? run.spreadsheetId}</h2>
+            <p>{run.prompt}</p>
+          </div>
+          <Button aria-label="Close benchmark review" icon={<X size={17} />} shape="square" type="button" variant="secondary" onClick={onClose} />
+        </header>
+
+        <div className="benchmark-modal-meta">
+          <MetricCard icon={<Clock size={18} />} label="Answer speed" value={formatSeconds(run.answerSeconds)} />
+          <MetricCard icon={<BarChart3 size={18} />} label="Tokens" value={formatNumber(run.totalTokens)} />
+          <MetricCard icon={<Gauge size={18} />} label="Model" value={run.modelProvider ? `${run.modelProvider}` : "n/a"} />
+          <article className="metric-card">
+            <div><Star size={18} /></div>
+            <span>Score</span>
+            <QualityButtons quality={run.quality} runId={run.id} setQuality={setQuality} />
+          </article>
+        </div>
+
+        <div className="benchmark-modal-body">
+          {run.error ? (
+            <Banner variant="error" title="Benchmark error" description={run.error} />
+          ) : spec ? (
+            <div className="benchmark-rendered-answer">
+              <JsonRenderReport spec={spec} />
+            </div>
+          ) : (
+            <pre>{run.answer}</pre>
+          )}
+        </div>
+      </section>
     </div>
   );
 }
@@ -3163,6 +4265,18 @@ const agentRoute = createRoute({
   path: "/agents/$agentId",
 });
 
+const agentReportRoute = createRoute({
+  component: AgentReportPage,
+  getParentRoute: () => rootRoute,
+  path: "/agents/$agentId/report",
+});
+
+const agentReportEditRoute = createRoute({
+  component: AgentReportEditPage,
+  getParentRoute: () => rootRoute,
+  path: "/agents/$agentId/report/edit",
+});
+
 const benchmarkRoute = createRoute({
   component: BenchmarkDashboardPage,
   getParentRoute: () => rootRoute,
@@ -3175,7 +4289,25 @@ const spreadsheetRoute = createRoute({
   path: "/spreadsheets/$spreadsheetId",
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, uploadRoute, askRoute, agentsRoute, createAgentRoute, agentRoute, benchmarkRoute, spreadsheetRoute]);
+const spreadsheetUploadFlowRoute = createRoute({
+  component: SpreadsheetUploadFlowPage,
+  getParentRoute: () => rootRoute,
+  path: "/spreadsheets/$spreadsheetId/upload-flow",
+});
+
+const routeTree = rootRoute.addChildren([
+  indexRoute,
+  uploadRoute,
+  askRoute,
+  agentsRoute,
+  createAgentRoute,
+  agentRoute,
+  agentReportRoute,
+  agentReportEditRoute,
+  benchmarkRoute,
+  spreadsheetRoute,
+  spreadsheetUploadFlowRoute,
+]);
 const router = createRouter({ routeTree });
 
 declare module "@tanstack/react-router" {

@@ -7,8 +7,10 @@ import { z } from "zod";
 import {
   json,
   jsonRenderResponseInstructions,
+  generatedTextFromResult,
   modelEntriesForRequest,
   modelConfig,
+  parseJsonText,
   parseStringArray,
   providerModel,
   requestedModelEntry,
@@ -133,6 +135,12 @@ export class AgentThink extends Think<Env> {
     if (url.pathname.endsWith("/traces")) return json({ traces: this.listTraces(url.searchParams.get("since")) });
     if (url.pathname.endsWith("/extraction-trace")) return json({ traces: this.listExtractionTraces() });
     if (url.pathname.endsWith("/agent-database") && request.method === "GET") return json(this.listAgentDatabaseTables());
+    if (url.pathname.endsWith("/report") && request.method === "GET") return json({ report: this.getAgentReport() });
+    if (url.pathname.endsWith("/report") && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as { prompt?: unknown };
+      const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+      return json({ report: await this.generateAgentReport(prompt) });
+    }
     if (url.pathname.endsWith("/agent-table") && request.method === "GET") {
       const tableName = url.searchParams.get("table");
       if (!tableName) return json({ error: "Missing table query parameter." }, { status: 400 });
@@ -189,16 +197,19 @@ export class AgentThink extends Think<Env> {
           temperature: 0.2,
           tools: this.getTools(),
         });
+        const responseText =
+          generatedTextFromResult(result) ||
+          "The agent completed the request but did not return a visible answer. Please retry or ask for a shorter answer.";
         this.recordTrace({
-          detail: { finishReason: result.finishReason, usage: result.usage },
+          detail: { emptyResponse: !generatedTextFromResult(result), finishReason: result.finishReason, usage: result.usage },
           durationMs: Date.now() - startedAt,
           requestId,
           spanType: "api",
           status: "done",
           title: "API request complete",
         });
-        this.recordChatMessage("assistant", result.text, requestId);
-        return json({ agentName: this.name, finishReason: result.finishReason, model, requestId, response: result.text, usage: result.usage });
+        this.recordChatMessage("assistant", responseText, requestId);
+        return json({ agentName: this.name, finishReason: result.finishReason, model, requestId, response: responseText, usage: result.usage });
       } catch (error) {
         this.recordTrace({
           detail: error instanceof Error ? error.message : String(error),
@@ -358,6 +369,16 @@ export class AgentThink extends Think<Env> {
         updated_at TEXT NOT NULL
       )
     `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS agent_reports (
+        id TEXT PRIMARY KEY,
+        prompt TEXT NOT NULL,
+        spec_json TEXT NOT NULL,
+        title TEXT,
+        generated_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `;
     try {
       this.ctx.storage.sql.exec("ALTER TABLE agent_table_mappings ADD COLUMN metadata_json TEXT");
     } catch (error) {
@@ -464,6 +485,127 @@ export class AgentThink extends Think<Env> {
       sources: this.sql`SELECT * FROM agent_sources ORDER BY category, filename`,
       tables: this.sql`SELECT * FROM agent_table_mappings ORDER BY table_kind, table_name`,
     };
+  }
+
+  private getAgentReport() {
+    this.ensureAgentSchema();
+    const row = this.sql<{ generated_at: string; id: string; prompt: string; spec_json: string; title: string | null; updated_at: string }>`
+      SELECT id, prompt, spec_json, title, generated_at, updated_at
+      FROM agent_reports
+      WHERE id = 'current'
+      LIMIT 1
+    `[0];
+    if (!row) return null;
+    const latestDataUpdatedAt = this.latestAgentDataUpdatedAt();
+    return {
+      generatedAt: row.generated_at,
+      id: row.id,
+      isStale: latestDataUpdatedAt ? new Date(latestDataUpdatedAt).getTime() > new Date(row.generated_at).getTime() : false,
+      latestDataUpdatedAt,
+      prompt: row.prompt,
+      spec: this.parseJsonObject(row.spec_json) ?? row.spec_json,
+      title: row.title,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private latestAgentDataUpdatedAt() {
+    this.ensureAgentSchema();
+    const rows = [
+      ...this.sql<{ updated_at: string }>`SELECT updated_at FROM agent_metadata`,
+      ...this.sql<{ updated_at: string }>`SELECT updated_at FROM agent_sources`,
+      ...this.sql<{ updated_at: string }>`SELECT updated_at FROM agent_table_mappings`,
+    ];
+    return rows
+      .map((row) => row.updated_at)
+      .filter(Boolean)
+      .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0] ?? null;
+  }
+
+  private async generateAgentReport(prompt: string) {
+    this.ensureAgentSchema();
+    const requestId = crypto.randomUUID();
+    const startedAt = Date.now();
+    const finalPrompt =
+      prompt ||
+      "Generate an executive report for this agent's current attached datasets. Summarize the most important facts, include key metrics, comparisons, caveats, and source notes. Make it useful as a standalone shared report.";
+    this.recordTrace({
+      detail: { prompt: finalPrompt },
+      requestId,
+      spanType: "report",
+      status: "running",
+      title: "Generating agent report",
+    });
+
+    try {
+      const snapshot = this.exportAgentSnapshot(250);
+      const result = await generateText({
+        model: this.getModel(),
+        prompt: [
+          finalPrompt,
+          "",
+          "Use the agent database snapshot below. Build a standalone report, not a chat reply.",
+          "Return ONLY the json-render spec JSON object.",
+          "",
+          JSON.stringify(snapshot),
+        ].join("\n"),
+        system: [
+          "You are generating a durable report for a multi-spreadsheet data agent.",
+          "The report will be hosted at the agent's /report page and should stand alone without chat context.",
+          "Use source notes, caveats, and citations where possible.",
+          "Prefer concise sections with clear headings, metrics, charts, and small tables.",
+          jsonRenderResponseInstructions(),
+        ].join("\n"),
+        temperature: 0.15,
+      });
+      const text = generatedTextFromResult(result);
+      const spec = parseJsonText(text);
+      const title = this.reportTitleFromSpec(spec) ?? "Agent report";
+      const now = new Date().toISOString();
+      this.sql`
+        INSERT INTO agent_reports (id, prompt, spec_json, title, generated_at, updated_at)
+        VALUES ('current', ${finalPrompt}, ${JSON.stringify(spec)}, ${title}, ${now}, ${now})
+        ON CONFLICT(id) DO UPDATE SET
+          prompt = excluded.prompt,
+          spec_json = excluded.spec_json,
+          title = excluded.title,
+          generated_at = excluded.generated_at,
+          updated_at = excluded.updated_at
+      `;
+      this.recordTrace({
+        detail: { title, usage: result.usage },
+        durationMs: Date.now() - startedAt,
+        requestId,
+        spanType: "report",
+        status: "done",
+        title: "Agent report generated",
+      });
+      return this.getAgentReport();
+    } catch (error) {
+      this.recordTrace({
+        detail: error instanceof Error ? error.message : String(error),
+        durationMs: Date.now() - startedAt,
+        requestId,
+        spanType: "report",
+        status: "error",
+        title: "Agent report failed",
+      });
+      throw error;
+    }
+  }
+
+  private reportTitleFromSpec(value: unknown): string | null {
+    if (!value || typeof value !== "object") return null;
+    const elements = (value as { elements?: unknown }).elements;
+    if (!elements || typeof elements !== "object") return null;
+    for (const element of Object.values(elements as Record<string, unknown>)) {
+      if (!element || typeof element !== "object") continue;
+      const record = element as { props?: Record<string, unknown>; type?: unknown };
+      if (record.type === "Heading" && typeof record.props?.text === "string" && record.props.text.trim()) {
+        return record.props.text.trim().slice(0, 160);
+      }
+    }
+    return null;
   }
 
   private listAgentDatabaseTables() {
@@ -751,6 +893,7 @@ export class AgentThink extends Think<Env> {
     this.sql`DELETE FROM agent_table_mappings`;
     this.sql`DELETE FROM agent_sources`;
     this.sql`DELETE FROM agent_metadata`;
+    this.sql`DELETE FROM agent_reports`;
     if (dropTraces) this.sql`DELETE FROM agent_traces`;
     this.clearChatMessages();
   }
