@@ -179,6 +179,28 @@ type BenchmarkRunPayload = {
   uploadSeconds?: unknown;
 };
 
+type DatasetAgentRequestPayload = AgentRequestPayload & {
+  category?: unknown;
+};
+
+type DataGovPackage = {
+  id?: string;
+  notes?: string;
+  organization?: { title?: string };
+  resources?: DataGovResource[];
+  title?: string;
+};
+
+type DataGovResource = {
+  description?: string;
+  format?: string;
+  id?: string;
+  last_modified?: string;
+  name?: string;
+  size?: number;
+  url?: string;
+};
+
 type BenchmarkRunRow = {
   answer: string;
   answer_seconds: number;
@@ -1183,6 +1205,272 @@ async function sendBenchmarkQuery(request: Request, env: Env) {
   }
 }
 
+function keywordSet(value: string) {
+  return new Set(
+    value
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((part) => part.length > 2),
+  );
+}
+
+function lexicalScore(query: string, text: string) {
+  const terms = keywordSet(query);
+  if (terms.size === 0) return 0;
+  const haystack = keywordSet(text);
+  let matches = 0;
+  for (const term of terms) {
+    if (haystack.has(term)) matches += 1;
+  }
+  return matches / terms.size;
+}
+
+function candidateSearchText(candidate: SpreadsheetSearchCandidate) {
+  return [
+    candidate.filename,
+    candidate.description,
+    candidate.status,
+    candidate.columns.join(" "),
+    candidate.tables.map((table) => `${table.name} ${table.sourceName} ${table.columns.join(" ")}`).join(" "),
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function supportedResource(resource: DataGovResource) {
+  const format = (resource.format ?? "").toLowerCase();
+  const url = resource.url ?? "";
+  return (
+    format.includes("csv") ||
+    format.includes("tsv") ||
+    format.includes("xls") ||
+    format.includes("xlsx") ||
+    format.includes("ods") ||
+    format.includes("xml") ||
+    /\.(csv|tsv|xlsx?|ods|xml)(?:[?#].*)?$/i.test(url)
+  );
+}
+
+function filenameFromResource(resource: DataGovResource, dataset: DataGovPackage) {
+  const urlName = resource.url ? decodeURIComponent(new URL(resource.url).pathname.split("/").filter(Boolean).pop() ?? "") : "";
+  const base = resource.name || dataset.title || dataset.id || "data-gov-resource";
+  const format = (resource.format || urlName.split(".").pop() || "csv").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const filename = urlName && /\.[a-z0-9]+$/i.test(urlName) ? urlName : `${base}.${format || "csv"}`;
+  return safeFilename(filename);
+}
+
+async function searchLocalDataset(env: Env, message: string) {
+  const candidates = await spreadsheetSearchCandidates(env);
+  const ranked = candidates
+    .map((candidate) => ({ candidate, score: lexicalScore(message, candidateSearchText(candidate)) }))
+    .sort((a, b) => b.score - a.score);
+  return { candidates, match: ranked[0] ?? null };
+}
+
+async function searchDataGov(message: string) {
+  const url = new URL("https://data.gov.uk/api/action/package_search");
+  url.searchParams.set("q", message);
+  url.searchParams.set("rows", "8");
+
+  const response = await fetch(url, {
+    headers: { accept: "application/json", "user-agent": "xlsx-song-agent-sandbox/1.0" },
+  });
+  if (!response.ok) throw new Error(`data.gov.uk search failed with ${response.status}`);
+
+  const data = (await response.json()) as {
+    result?: { results?: DataGovPackage[] };
+    success?: boolean;
+  };
+  const packages = data.result?.results ?? [];
+  const resources = packages.flatMap((dataset) =>
+    (dataset.resources ?? [])
+      .filter(supportedResource)
+      .map((resource) => ({
+        dataset,
+        resource,
+        score: lexicalScore(message, `${dataset.title ?? ""} ${dataset.notes ?? ""} ${resource.name ?? ""} ${resource.description ?? ""} ${resource.format ?? ""}`),
+      })),
+  );
+  resources.sort((a, b) => b.score - a.score);
+  return { packages, resources };
+}
+
+async function importDataGovResource(env: Env, message: string, dataset: DataGovPackage, resource: DataGovResource) {
+  if (!resource.url) throw new Error("Selected data.gov.uk resource has no URL.");
+  const response = await fetch(resource.url, { headers: { "user-agent": "xlsx-song-agent-sandbox/1.0" } });
+  if (!response.ok) throw new Error(`Resource download failed with ${response.status}`);
+
+  const blob = await response.blob();
+  const filename = filenameFromResource(resource, dataset);
+  const file = new File([blob], filename, {
+    type: response.headers.get("content-type") ?? "application/octet-stream",
+  });
+  if (!isSpreadsheetFile(file)) throw new Error(`Resource ${filename} is not a supported spreadsheet format.`);
+
+  const formData = new FormData();
+  formData.append("spreadsheet", file);
+  formData.append("spreadsheetId", crypto.randomUUID());
+  formData.append("preExtract", "true");
+  formData.append("category", "data.gov.uk");
+
+  const uploadResponse = await uploadSpreadsheet(new Request("https://internal.local/api/spreadsheets", { body: formData, method: "POST" }), env);
+  if (!uploadResponse.ok) throw new Error((await uploadResponse.text()) || "Failed to import data.gov.uk resource.");
+  const upload = (await uploadResponse.json()) as { spreadsheet?: SpreadsheetRow };
+  const spreadsheetId = upload.spreadsheet?.id;
+  if (!spreadsheetId) throw new Error("Imported spreadsheet id was not returned.");
+
+  const timeoutMs = 105_000;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const spreadsheet = await getSpreadsheetRow(env, spreadsheetId);
+    if (spreadsheet?.status === "ready" || spreadsheet?.status === "failed") return spreadsheet;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+
+  return getSpreadsheetRow(env, spreadsheetId);
+}
+
+async function sendDatasetAgentRequest(request: Request, env: Env) {
+  const body = (await request.json().catch(() => ({}))) as DatasetAgentRequestPayload;
+  if (typeof body.message !== "string" || !body.message.trim()) {
+    return json({ error: "Send JSON with a non-empty 'message' string." }, { status: 400 });
+  }
+  let selectedModel: ModelEntry | undefined;
+  try {
+    selectedModel = requestedModelEntry(env, body);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "Invalid model." }, { status: 400 });
+  }
+
+  const message = body.message.trim();
+  const steps: Array<{ detail?: unknown; status: "done" | "error" | "running"; title: string }> = [];
+  const startedAt = Date.now();
+
+  try {
+    steps.push({ status: "running", title: "Searching local Data Library" });
+    const local = await searchLocalDataset(env, message);
+    const localThreshold = local.candidates.length === 1 ? 0.18 : 0.25;
+
+    if (local.match && local.match.score >= localThreshold) {
+      const spreadsheet = await getSpreadsheetRow(env, local.match.candidate.id);
+      if (!spreadsheet) throw new Error("Local dataset match could not be loaded.");
+      steps[steps.length - 1] = {
+        detail: { filename: spreadsheet.filename, score: local.match.score },
+        status: "done",
+        title: "Found relevant local dataset",
+      };
+      const answer = await fetchAgentMessageData(env, spreadsheet.agent_name, message, selectedModel);
+      const data = answer.data && typeof answer.data === "object" ? answer.data : { response: answer.data };
+      const responseText = typeof (data as { response?: unknown }).response === "string" ? (data as { response: string }).response : "";
+      return json(
+        {
+          ...data,
+          response: `I found an existing local dataset that looks relevant: ${spreadsheet.filename}. I used that rather than searching data.gov.uk.\n\n${responseText}`,
+          selectedSpreadsheet: { filename: spreadsheet.filename, id: spreadsheet.id, reason: "Matched an existing local dataset.", score: local.match.score },
+          selection: {
+            candidates: local.candidates,
+            durationMs: 0,
+            model: modelConfig(env, selectedModel),
+            reason: "Matched an existing local dataset before searching data.gov.uk.",
+            score: local.match.score,
+            usage: null,
+          },
+          steps,
+          totalDurationMs: Date.now() - startedAt,
+        },
+        { status: answer.status },
+      );
+    }
+
+    steps[steps.length - 1] = {
+      detail: { candidates: local.candidates.length, bestScore: local.match?.score ?? null },
+      status: "done",
+      title: "No strong local match",
+    };
+    steps.push({ status: "running", title: "Searching data.gov.uk" });
+    const external = await searchDataGov(message);
+    const best = external.resources[0];
+    if (!best) {
+      steps[steps.length - 1] = { detail: { datasets: external.packages.length }, status: "error", title: "No usable data.gov.uk file found" };
+      return json({
+        agentName: "dataset-agent",
+        finishReason: "no_dataset",
+        model: modelConfig(env, selectedModel),
+        requestId: crypto.randomUUID(),
+        response: "Sorry, I could not find a relevant local dataset or a usable spreadsheet file on data.gov.uk for that question.",
+        steps,
+        totalDurationMs: Date.now() - startedAt,
+        usage: null,
+      });
+    }
+
+    steps[steps.length - 1] = {
+      detail: { dataset: best.dataset.title, resource: best.resource.name, score: best.score },
+      status: "done",
+      title: "Found data.gov.uk resource",
+    };
+    steps.push({ status: "running", title: "Importing data.gov.uk file" });
+    const imported = await importDataGovResource(env, message, best.dataset, best.resource);
+    if (!imported || imported.status !== "ready") {
+      steps[steps.length - 1] = { detail: { status: imported?.status ?? "unknown" }, status: "error", title: "Imported dataset is not ready yet" };
+      return json({
+        agentName: imported?.agent_name ?? "dataset-agent",
+        finishReason: "import_pending",
+        model: modelConfig(env, selectedModel),
+        requestId: crypto.randomUUID(),
+        response: `I found and imported ${best.dataset.title ?? best.resource.name ?? "a data.gov.uk dataset"}, but it is still being processed. Please retry shortly.`,
+        selectedSpreadsheet: imported ? { filename: imported.filename, id: imported.id, reason: "Imported from data.gov.uk.", score: best.score } : undefined,
+        steps,
+        totalDurationMs: Date.now() - startedAt,
+        usage: null,
+      });
+    }
+
+    steps[steps.length - 1] = { detail: { filename: imported.filename, id: imported.id }, status: "done", title: "Imported dataset and created agent" };
+    const answer = await fetchAgentMessageData(env, imported.agent_name, message, selectedModel);
+    const data = answer.data && typeof answer.data === "object" ? answer.data : { response: answer.data };
+    const responseText = typeof (data as { response?: unknown }).response === "string" ? (data as { response: string }).response : "";
+    return json(
+      {
+        ...data,
+        response: `I could not find a strong local match, so I searched data.gov.uk and imported ${imported.filename}. I created a dataset agent for it and used that to answer.\n\n${responseText}`,
+        importedSpreadsheet: { filename: imported.filename, id: imported.id },
+        selectedSpreadsheet: { filename: imported.filename, id: imported.id, reason: "Imported from data.gov.uk after no strong local match.", score: best.score },
+        selection: {
+          candidates: external.resources.slice(0, 5).map((item) => ({
+            columns: [],
+            description: item.dataset.notes ?? item.resource.description ?? null,
+            filename: item.resource.name ?? item.dataset.title ?? item.resource.url ?? "data.gov.uk resource",
+            id: item.resource.id ?? item.dataset.id ?? item.resource.url ?? "data-gov-resource",
+            rowCount: 0,
+            status: item.resource.format ?? "resource",
+            tables: [],
+            updatedAt: item.resource.last_modified ?? "",
+          })),
+          durationMs: 0,
+          model: modelConfig(env, selectedModel),
+          reason: "Imported the best matching data.gov.uk resource after local search did not find a strong match.",
+          score: best.score,
+          usage: null,
+        },
+        steps,
+        totalDurationMs: Date.now() - startedAt,
+      },
+      { status: answer.status },
+    );
+  } catch (error) {
+    steps.push({ detail: error instanceof Error ? error.message : String(error), status: "error", title: "Dataset agent failed" });
+    return json(
+      {
+        error: error instanceof Error ? error.message : "Dataset agent failed.",
+        response: "Sorry, I could not complete the dataset search and import workflow.",
+        steps,
+      },
+      { status: 500 },
+    );
+  }
+}
+
 function numberOrNull(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -1735,6 +2023,10 @@ export default {
 
     if (url.pathname === "/api/agent/request" && request.method === "POST") {
       return sendAgentRequest(request, env);
+    }
+
+    if (url.pathname === "/api/dataset-agent/request" && request.method === "POST") {
+      return sendDatasetAgentRequest(request, env);
     }
 
     if (url.pathname === "/api/benchmarks/query" && request.method === "POST") {

@@ -177,6 +177,10 @@ type RenderedMessage = {
 type AgentRequestResponse = {
   agentName: string;
   finishReason?: string;
+  importedSpreadsheet?: {
+    filename: string;
+    id: string;
+  };
   model?: {
     fallbackModels?: Array<{ model: string; provider: string }>;
     gatewayId?: string;
@@ -192,7 +196,14 @@ type AgentRequestResponse = {
     score?: number | null;
   };
   selection?: BenchmarkSelectionEvidence;
+  steps?: DatasetAgentStep[];
   usage?: Record<string, unknown>;
+};
+
+type DatasetAgentStep = {
+  detail?: unknown;
+  status: "done" | "error" | "running";
+  title: string;
 };
 
 type BenchmarkSelectionCandidate = {
@@ -641,6 +652,10 @@ function RootLayout() {
           <span>XLSX Song</span>
         </Link>
         <div className="nav-actions">
+          <Link to="/ask" className="nav-button">
+            <Search size={18} />
+            <span>Ask data</span>
+          </Link>
           <Link to="/upload" className="nav-button">
             <Plus size={18} />
             <span>Upload</span>
@@ -2631,6 +2646,127 @@ function AgentSourcesView({ sheets }: { sheets: Spreadsheet[] }) {
   );
 }
 
+function AskDataPage() {
+  const [input, setInput] = useState("Find a relevant public dataset and answer my question.");
+  const [messages, setMessages] = useState<RenderedMessage[]>([]);
+  const [latestRun, setLatestRun] = useState<BenchmarkRun | null>(null);
+  const [steps, setSteps] = useState<DatasetAgentStep[]>([]);
+  const [showEvidence, setShowEvidence] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const text = input.trim();
+    if (!text || isRunning) return;
+
+    const totalStarted = performance.now();
+    setMessages((current) => [...current, { id: crypto.randomUUID(), role: "user", text }]);
+    setInput("");
+    setSteps([{ status: "running", title: "Starting dataset search" }]);
+    setIsRunning(true);
+    setShowEvidence(false);
+
+    try {
+      const answerStarted = performance.now();
+      const answer = await fetchJson<AgentRequestResponse>("/api/dataset-agent/request", {
+        body: JSON.stringify({ message: text }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      setSteps(answer.steps ?? []);
+      const run = createBenchmarkRunFromAnswer({
+        answer,
+        answerSeconds: (performance.now() - answerStarted) / 1000,
+        prompt: text,
+        spreadsheetFilename: answer.selectedSpreadsheet?.filename ?? answer.importedSpreadsheet?.filename ?? "dataset-agent",
+        spreadsheetId: answer.selectedSpreadsheet?.id ?? answer.importedSpreadsheet?.id ?? "dataset-agent",
+        totalSeconds: (performance.now() - totalStarted) / 1000,
+        uploadSeconds: null,
+      });
+      const savedRun = await saveBenchmarkRun(run);
+      setLatestRun(savedRun);
+      setMessages((current) => [...current, { id: answer.requestId, role: "assistant", text: answer.response }]);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Dataset agent request failed";
+      setSteps((current) => [...current, { detail: message, status: "error", title: "Dataset search failed" }]);
+      setMessages((current) => [...current, { id: crypto.randomUUID(), role: "assistant", text: message }]);
+    } finally {
+      setIsRunning(false);
+    }
+  }
+
+  return (
+    <section className="chat-page dataset-chat-page">
+      <header className="chat-header">
+        <Link to="/" className="back-link"><ArrowLeft size={18} /><span>Spreadsheets</span></Link>
+        <div>
+          <p className="eyebrow">Dataset agent</p>
+          <h1>Ask across local and public data</h1>
+          <p className="muted">The agent checks local uploaded datasets first, then searches data.gov.uk if needed.</p>
+        </div>
+        <div className="chat-toolbar">
+          <Button disabled={!latestRun} icon={<Search size={16} />} size="sm" type="button" variant="secondary" onClick={() => setShowEvidence((value) => !value)}>
+            {showEvidence ? "Hide evidence" : "Evidence"}
+          </Button>
+          <Button
+            disabled={isRunning || messages.length === 0}
+            icon={<Trash2 size={16} />}
+            size="sm"
+            type="button"
+            variant="secondary-destructive"
+            onClick={() => {
+              setMessages([]);
+              setLatestRun(null);
+              setSteps([]);
+              setShowEvidence(false);
+            }}
+          >
+            Clear chat
+          </Button>
+        </div>
+      </header>
+
+      <div className="chat-main">
+        <div className="chat-workspace">
+          <div className="messages">
+            {messages.length === 0 ? (
+              <Empty className="empty-state" icon={<Search size={38} />} size="sm" title="Dataset agent ready" description="Ask a question and I will find the best local or data.gov.uk dataset." />
+            ) : messages.map((message) => <ChatMessage key={message.id} isStreaming={false} message={message} />)}
+            {showEvidence && latestRun ? <EvidenceViewer run={latestRun} /> : null}
+          </div>
+          <form className="composer" onSubmit={submit}>
+            <Input aria-label="Message" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask for data..." />
+            <Button aria-label="Send message" className="icon-button" loading={isRunning} shape="square" type="submit" variant="primary" disabled={isRunning || !input.trim()}>
+              <Send size={18} />
+            </Button>
+          </form>
+        </div>
+        <aside className="trace-panel">
+          <header>
+            <div className="trace-heading"><p className="eyebrow">Trace</p><h2>Dataset search</h2></div>
+          </header>
+          <div className="trace-content">
+            {steps.length === 0 ? <p className="trace-empty">No search steps yet.</p> : (
+              <ol className="trace-list">
+                {steps.map((step, index) => (
+                  <li className={`trace-item ${step.status}`} key={`${step.title}-${index}`}>
+                    <div><span className="trace-dot" /></div>
+                    <article>
+                      <div className="trace-title-row"><h3>{step.title}</h3></div>
+                      <p>{step.status}</p>
+                      {step.detail !== undefined ? <pre>{typeof step.detail === "string" ? step.detail : JSON.stringify(step.detail, null, 2)}</pre> : null}
+                    </article>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
 function BenchmarkDashboardPage() {
   const [runs, setRuns] = useState<BenchmarkRun[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -2878,6 +3014,12 @@ const uploadRoute = createRoute({
   path: "/upload",
 });
 
+const askRoute = createRoute({
+  component: AskDataPage,
+  getParentRoute: () => rootRoute,
+  path: "/ask",
+});
+
 const agentsRoute = createRoute({
   component: AgentsListPage,
   getParentRoute: () => rootRoute,
@@ -2908,7 +3050,7 @@ const spreadsheetRoute = createRoute({
   path: "/spreadsheets/$spreadsheetId",
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, uploadRoute, agentsRoute, createAgentRoute, agentRoute, benchmarkRoute, spreadsheetRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, uploadRoute, askRoute, agentsRoute, createAgentRoute, agentRoute, benchmarkRoute, spreadsheetRoute]);
 const router = createRouter({ routeTree });
 
 declare module "@tanstack/react-router" {
