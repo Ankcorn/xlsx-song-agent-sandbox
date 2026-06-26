@@ -1,0 +1,120 @@
+[
+  {
+    "prompt": "What is this spreadsheet about, and what are the three most notable numeric facts? Include the source columns or sheet names you used.",
+    "answer": "Here is the full answer:\n\n```json\n{\n  \"root\": \"root\",\n  \"elements\": {\n    \"root\": {\n      \"type\": \"Stack\",\n      \"props\": { \"direction\": \"vertical\", \"gap\": \"lg\" },\n      \"children\": [\"heading\", \"about\", \"sep1\", \"kpis\", \"sep2\", \"facts_heading\", \"facts\", \"chart\", \"sources\"]\n    },\n    \"heading\": {\n      \"type\": \"Heading\",\n      \"props\": { \"level\": 2, \"text\": \"UK Fuel & Oil Prices (1977\u20132025)\" },\n      \"children\": []\n    },\n    \"about\": {\n      \"type\": \"Text\",\n      \"props\": { \"text\": \"This spreadsheet contains annual average retail pump prices for petrol (premium unleaded / ULSP) and diesel (DERV / ULSD) in the United Kingdom, measured in pence per litre (p/l). It covers 1977\u20132025, with petrol data available from 1989 onward (earlier years marked as unavailable).\" },\n      \"children\": []\n    },\n    \"sep1\": { \"type\": \"Separator\", \"props\": {}, \"children\": [] },\n    \"kpis\": {\n      \"type\": \"StatGrid\",\n      \"props\": {\n        \"items\": [\n          { \"label\": \"Years Covered\", \"value\": \"49\", \"delta\": null, \"description\": \"1977\u20132025 (annual)\" },\n          { \"label\": \"Peak Petrol Price\", \"value\": \"164.73 p/l\", \"delta\": null, \"description\": \"2022 annual average\" },\n          { \"label\": \"Peak Diesel Price\", \"value\": \"177.66 p/l\", \"delta\": null, \"description\": \"2022 annual average\" }\n        ]\n      },\n      \"children\": []\n    },\n    \"sep2\": { \"type\": \"Separator\", \"props\": {}, \"children\": [] },\n    \"facts_heading\": {\n      \"type\": \"Heading\",\n      \"props\": { \"level\": 3, \"text\": \"Three Most Notable Numeric Facts\" },\n      \"children\": []\n    },\n    \"facts\": {\n      \"type\": \"DataTable\",\n      \"props\": {\n        \"columns\": [\"#\", \"Fact\", \"Value\", \"Source Column\"],\n        \"rows\": [\n          {\n            \"#\": \"1\",\n            \"Fact\": \"2022 was the most expensive year on record for both fuels \u2014 petrol hit 164.73 p/l and diesel 177.66 p/l, driven by post-pandemic demand and the energy crisis.\",\n            \"Value\": \"Petrol 164.73 p/l \u00b7 Diesel 177.66 p/l\",\n            \"Source Column\": \"petrol_price_ppl / diesel_price_ppl (year = 2022)\"\n          },\n          {\n            \"#\": \"2\",\n            \"Fact\": \"Prices have risen ~3.7\u00d7 since 1989 (the first year petrol data is available). Petrol was 38.29 p/l in 1989 vs 135.07 p/l in 2025.\",\n            \"Value\": \"+252% over 36 years\",\n            \"Source Column\": \"petrol_price_ppl (years 1989 & 2025)\"\n          },\n          {\n            \"#\": \"3\",\n            \"Fact\": \"Diesel was cheaper than petrol for most of the 1990s but has consistently exceeded petrol since ~2005, with the gap widening to over 13 p/l in 2022.\",\n            \"Value\": \"Diesel premium: +12.93 p/l in 2022\",\n            \"Source Column\": \"diesel_price_ppl \u2212 petrol_price_ppl (year = 2022)\"\n          }\n        ],\n        \"caption\": \"Source: doc_1_fuel_price_annual table \u00b7 fuel-and-oil-prices.csv\"\n      },\n      \"children\": []\n    },\n    \"chart\": {\n      \"type\": \"LineChart\",\n      \"props\": {\n        \"title\": \"UK Annual Average Fuel Prices (p/l)\",\n        \"description\": \"Petrol data available from 1989; diesel from 1977.\",\n        \"xKey\": \"year\",\n        \"yLabel\": \"Pence per litre\",\n        \"height\": 300,\n        \"series\": [\n          { \"key\": \"petrol\", \"label\": \"Petrol (ULSP)\", \"color\": \"#f59e0b\" },\n          { \"key\": \"diesel\", \"label\": \"Diesel (ULSD)\", \"color\": \"#3b82f6\" }\n        ],\n        \"data\": [\n          {\"year\":\"1977\",\"diesel\":18.21},{\"year\":\"1978\",\"diesel\":18.46},{\"year\":\"1979\",\"diesel\":23.65},\n          {\"year\":\"1980\",\"diesel\":29.67},{\"year\":\"1981\",\"diesel\":34.01},{\"year\":\"1982\",\"diesel\":35.86},\n          {\"year\":\"1983\",\"diesel\":37.3},{\"year\":\"1984\",\"diesel\":38.33},{\"year\":\"1985\",\"diesel\":41.94},\n          {\"year\":\"1986\",\"diesel\":35.6},{\"year\":\"1987\",\"diesel\":34.58},{\"year\":\"1988\",\"diesel\":34.0},\n          {\"year\":\"1989\",\"petrol\":38.29,\"diesel\":36.18},{\"year\":\"1990\",\"petrol\":42.03,\"diesel\":40.48},\n          {\"year\":\"1991\",\"petrol\":45.07,\"diesel\":43.82},{\"year\":\"1992\",\"petrol\":46.07,\"diesel\":45.01},\n          {\"year\":\"1993\",\"petrol\":49.44,\"diesel\":49.2},{\"year\":\"1994\",\"petrol\":51.58,\"diesel\":51.53},\n          {\"year\":\"1995\",\"petrol\":53.77,\"diesel\":54.24},{\"year\":\"1996\",\"petrol\":56.52,\"diesel\":57.71},\n          {\"year\":\"1997\",\"petrol\":61.82,\"diesel\":62.47},{\"year\":\"1998\",\"petrol\":64.8,\"diesel\":65.5},\n          {\"year\":\"1999\",\"petrol\":70.16,\"diesel\":72.49},{\"year\":\"2000\",\"petrol\":79.93,\"diesel\":81.34},\n          {\"year\":\"2001\",\"petrol\":75.72,\"diesel\":77.84},{\"year\":\"2002\",\"petrol\":73.24,\"diesel\":75.46},\n          {\"year\":\"2003\",\"petrol\":76.04,\"diesel\":77.92},{\"year\":\"2004\",\"petrol\":80.22,\"diesel\":81.91},\n          {\"year\":\"2005\",\"petrol\":86.75,\"diesel\":90.86},{\"year\":\"2006\",\"petrol\":91.32,\"diesel\":95.21},\n          {\"year\":\"2007\",\"petrol\":94.24,\"diesel\":96.85},{\"year\":\"2008\",\"petrol\":107.08,\"diesel\":117.51},\n          {\"year\":\"2009\",\"petrol\":99.29,\"diesel\":103.93},{\"year\":\"2010\",\"petrol\":116.9,\"diesel\":119.26},\n          {\"year\":\"2011\",\"petrol\":133.27,\"diesel\":138.72},{\"year\":\"2012\",\"petrol\":135.39,\"diesel\":141.83},\n          {\"year\":\"2013\",\"petrol\":134.15,\"diesel\":140.41},{\"year\":\"2014\",\"petrol\":127.5,\"diesel\":133.46},\n          {\"year\":\"2015\",\"petrol\":111.13,\"diesel\":114.9},{\"year\":\"2016\",\"petrol\":108.85,\"diesel\":110.13},\n          {\"year\":\"2017\",\"petrol\":117.59,\"diesel\":120.15},{\"year\":\"2018\",\"petrol\":125.2,\"diesel\":129.98},\n          {\"year\":\"2019\",\"petrol\":124.88,\"diesel\":131.48},{\"year\":\"2020\",\"petrol\":113.95,\"diesel\":119.14},\n          {\"year\":\"2021\",\"petrol\":131.27,\"diesel\":134.94},{\"year\":\"2022\",\"petrol\":164.73,\"diesel\":177.66},\n          {\"year\":\"2023\",\"petrol\":147.75,\"diesel\":158.19},{\"year\":\"2024\",\"petrol\":141.48,\"diesel\":148.33},\n          {\"year\":\"2025\",\"petrol\":135.07,\"diesel\":142.55}\n        ]\n      },\n      \"children\": []\n    },\n    \"sources\": {\n      \"type\": \"KeyValueList\",\n      \"props\": {\n        \"items\": [\n          { \"key\": \"File\", \"value\": \"fuel-and-oil-prices.csv\" },\n          { \"key\": \"DB Table\", \"value\": \"doc_1_fuel_price_annual\" },\n          { \"key\": \"Petrol column\", \"value\": \"petrol_price_ppl (Motor spirit: Premium unleaded / ULSP)\" },\n          { \"key\": \"Diesel column\", \"value\": \"diesel_price_ppl (Derv: Diesel / ULSD)\" },\n          { \"key\": \"Units\", \"value\": \"Pence per litre (p/l), annual averages\" },\n          { \"key\": \"Caveat\", \"value\": \"Petrol data unavailable (shown as '..') for 1977\u20131988; stored as NULL/blank.\" }\n        ]\n      },\n      \"children\": []\n    }\n  }\n}\n```",
+    "access_mode": "sqlite",
+    "base_url": "https://xlsx-song-agent-sandbox.ankcorn.workers.dev",
+    "endpoint": "https://xlsx-song-agent-sandbox.ankcorn.workers.dev/api/spreadsheets/5610ae0e-6ecc-4b7a-915f-2a2578aacc1c/agent-request",
+    "finish_reason": "stop",
+    "model_provider": "anthropic",
+    "model_name": "claude-sonnet-4-6",
+    "model_config": {
+      "fallbackModels": [],
+      "gatewayId": "aigovhack",
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic"
+    },
+    "request_id": "7cf0f327-5689-4fd5-a80e-a0acade92f1e",
+    "spreadsheet_id": "5610ae0e-6ecc-4b7a-915f-2a2578aacc1c",
+    "spreadsheet_filename": "fuel-and-oil-prices.csv",
+    "total_seconds": 48.596337542,
+    "upload_seconds": 2.3462557079999997,
+    "answer_seconds": 48.59622987499999,
+    "input_tokens": 7084,
+    "output_tokens": 2292,
+    "total_tokens": 9376,
+    "estimated_cost_usd": 0.055632,
+    "pricing": {
+      "currency": "USD",
+      "inputPer1MTokens": 3.0,
+      "modelKey": "anthropic:claude-sonnet-4-6",
+      "outputPer1MTokens": 15.0,
+      "pricingAvailable": true,
+      "unit": "1M tokens"
+    },
+    "usage": {
+      "inputTokens": 7084,
+      "inputTokenDetails": {
+        "noCacheTokens": 7084,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      },
+      "outputTokens": 2292,
+      "outputTokenDetails": {},
+      "totalTokens": 9376,
+      "raw": {
+        "input_tokens": 7084,
+        "output_tokens": 2292,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "service_tier": "standard",
+        "inference_geo": "global"
+      },
+      "cachedInputTokens": 0
+    },
+    "error": null
+  },
+  {
+    "prompt": "What is this spreadsheet about, and what are the three most notable numeric facts? Include the source columns or sheet names you used.",
+    "answer": "Here is the full answer:\n\n```json\n{\n  \"root\": \"root\",\n  \"elements\": {\n    \"root\": {\n      \"type\": \"Stack\",\n      \"props\": { \"direction\": \"vertical\", \"gap\": \"lg\" },\n      \"children\": [\"heading\", \"about\", \"sep1\", \"kpis\", \"sep2\", \"facts_heading\", \"facts\", \"chart\", \"sources\"]\n    },\n    \"heading\": {\n      \"type\": \"Heading\",\n      \"props\": { \"level\": 2, \"text\": \"UK Fuel & Oil Prices (1977\u20132025)\" },\n      \"children\": []\n    },\n    \"about\": {\n      \"type\": \"Text\",\n      \"props\": { \"text\": \"This spreadsheet contains annual average retail pump prices for petrol (Premium Unleaded / ULSP) and diesel (DERV / ULSD) in the United Kingdom, measured in pence per litre (p/l). It spans 49 years from 1977 to 2025. Petrol data is only available from 1989 onward; diesel data runs the full range from 1977.\" },\n      \"children\": []\n    },\n    \"sep1\": { \"type\": \"Separator\", \"props\": {}, \"children\": [] },\n    \"kpis\": {\n      \"type\": \"StatGrid\",\n      \"props\": {\n        \"items\": [\n          { \"label\": \"Years Covered\", \"value\": \"49\", \"delta\": null, \"description\": \"1977\u20132025, annual averages\" },\n          { \"label\": \"Peak Petrol Price\", \"value\": \"164.73 p/l\", \"delta\": null, \"description\": \"2022 \u2014 all-time high\" },\n          { \"label\": \"Peak Diesel Price\", \"value\": \"177.66 p/l\", \"delta\": null, \"description\": \"2022 \u2014 all-time high\" }\n        ]\n      },\n      \"children\": []\n    },\n    \"sep2\": { \"type\": \"Separator\", \"props\": {}, \"children\": [] },\n    \"facts_heading\": {\n      \"type\": \"Heading\",\n      \"props\": { \"level\": 3, \"text\": \"Three Most Notable Numeric Facts\" },\n      \"children\": []\n    },\n    \"facts\": {\n      \"type\": \"DataTable\",\n      \"props\": {\n        \"columns\": [\"#\", \"Fact\", \"Value\", \"Source Column\"],\n        \"rows\": [\n          {\n            \"#\": \"1\",\n            \"Fact\": \"2022 was the most expensive year on record for both fuels, driven by post-pandemic demand and the energy crisis. Diesel exceeded petrol by a record 12.93 p/l that year.\",\n            \"Value\": \"Petrol 164.73 p/l \u00b7 Diesel 177.66 p/l\",\n            \"Source Column\": \"Motor spirit (ULSP) & Derv (ULSD), Year = 2022\"\n          },\n          {\n            \"#\": \"2\",\n            \"Fact\": \"Petrol prices rose 252.8% over 36 years \u2014 from 38.29 p/l in 1989 (first available year) to 135.07 p/l in 2025.\",\n            \"Value\": \"+252.8% (1989 \u2192 2025)\",\n            \"Source Column\": \"Motor spirit (ULSP), Years 1989 & 2025\"\n          },\n          {\n            \"#\": \"3\",\n            \"Fact\": \"Diesel prices have risen 682.8% since records began in 1977 \u2014 from just 18.21 p/l to 142.55 p/l in 2025, a near 8\u00d7 increase over 48 years.\",\n            \"Value\": \"+682.8% (1977 \u2192 2025)\",\n            \"Source Column\": \"Derv (ULSD), Years 1977 & 2025\"\n          }\n        ],\n        \"caption\": \"Source: fuel-and-oil-prices.csv \u00b7 columns: Motor spirit:Premium unleaded / ULSP & Derv: Diesel / ULSD (Pence per litre)\"\n      },\n      \"children\": []\n    },\n    \"chart\": {\n      \"type\": \"LineChart\",\n      \"props\": {\n        \"title\": \"UK Annual Average Fuel Prices (p/l)\",\n        \"description\": \"Petrol data available from 1989; diesel from 1977.\",\n        \"xKey\": \"year\",\n        \"yLabel\": \"Pence per litre\",\n        \"height\": 300,\n        \"series\": [\n          { \"key\": \"petrol\", \"label\": \"Petrol (ULSP)\", \"color\": \"#f59e0b\" },\n          { \"key\": \"diesel\", \"label\": \"Diesel (ULSD)\", \"color\": \"#3b82f6\" }\n        ],\n        \"data\": [\n          {\"year\":\"1977\",\"diesel\":18.21},{\"year\":\"1978\",\"diesel\":18.46},{\"year\":\"1979\",\"diesel\":23.65},\n          {\"year\":\"1980\",\"diesel\":29.67},{\"year\":\"1981\",\"diesel\":34.01},{\"year\":\"1982\",\"diesel\":35.86},\n          {\"year\":\"1983\",\"diesel\":37.3},{\"year\":\"1984\",\"diesel\":38.33},{\"year\":\"1985\",\"diesel\":41.94},\n          {\"year\":\"1986\",\"diesel\":35.6},{\"year\":\"1987\",\"diesel\":34.58},{\"year\":\"1988\",\"diesel\":34.0},\n          {\"year\":\"1989\",\"petrol\":38.29,\"diesel\":36.18},{\"year\":\"1990\",\"petrol\":42.03,\"diesel\":40.48},\n          {\"year\":\"1991\",\"petrol\":45.07,\"diesel\":43.82},{\"year\":\"1992\",\"petrol\":46.07,\"diesel\":45.01},\n          {\"year\":\"1993\",\"petrol\":49.44,\"diesel\":49.2},{\"year\":\"1994\",\"petrol\":51.58,\"diesel\":51.53},\n          {\"year\":\"1995\",\"petrol\":53.77,\"diesel\":54.24},{\"year\":\"1996\",\"petrol\":56.52,\"diesel\":57.71},\n          {\"year\":\"1997\",\"petrol\":61.82,\"diesel\":62.47},{\"year\":\"1998\",\"petrol\":64.8,\"diesel\":65.5},\n          {\"year\":\"1999\",\"petrol\":70.16,\"diesel\":72.49},{\"year\":\"2000\",\"petrol\":79.93,\"diesel\":81.34},\n          {\"year\":\"2001\",\"petrol\":75.72,\"diesel\":77.84},{\"year\":\"2002\",\"petrol\":73.24,\"diesel\":75.46},\n          {\"year\":\"2003\",\"petrol\":76.04,\"diesel\":77.92},{\"year\":\"2004\",\"petrol\":80.22,\"diesel\":81.91},\n          {\"year\":\"2005\",\"petrol\":86.75,\"diesel\":90.86},{\"year\":\"2006\",\"petrol\":91.32,\"diesel\":95.21},\n          {\"year\":\"2007\",\"petrol\":94.24,\"diesel\":96.85},{\"year\":\"2008\",\"petrol\":107.08,\"diesel\":117.51},\n          {\"year\":\"2009\",\"petrol\":99.29,\"diesel\":103.93},{\"year\":\"2010\",\"petrol\":116.9,\"diesel\":119.26},\n          {\"year\":\"2011\",\"petrol\":133.27,\"diesel\":138.72},{\"year\":\"2012\",\"petrol\":135.39,\"diesel\":141.83},\n          {\"year\":\"2013\",\"petrol\":134.15,\"diesel\":140.41},{\"year\":\"2014\",\"petrol\":127.5,\"diesel\":133.46},\n          {\"year\":\"2015\",\"petrol\":111.13,\"diesel\":114.9},{\"year\":\"2016\",\"petrol\":108.85,\"diesel\":110.13},\n          {\"year\":\"2017\",\"petrol\":117.59,\"diesel\":120.15},{\"year\":\"2018\",\"petrol\":125.2,\"diesel\":129.98},\n          {\"year\":\"2019\",\"petrol\":124.88,\"diesel\":131.48},{\"year\":\"2020\",\"petrol\":113.95,\"diesel\":119.14},\n          {\"year\":\"2021\",\"petrol\":131.27,\"diesel\":134.94},{\"year\":\"2022\",\"petrol\":164.73,\"diesel\":177.66},\n          {\"year\":\"2023\",\"petrol\":147.75,\"diesel\":158.19},{\"year\":\"2024\",\"petrol\":141.48,\"diesel\":148.33},\n          {\"year\":\"2025\",\"petrol\":135.07,\"diesel\":142.55}\n        ]\n      },\n      \"children\": []\n    },\n    \"sources\": {\n      \"type\": \"KeyValueList\",\n      \"props\": {\n        \"items\": [\n          { \"key\": \"File\", \"value\": \"fuel-and-oil-prices.csv\" },\n          { \"key\": \"Rows\", \"value\": \"49 (one per year, 1977\u20132025)\" },\n          { \"key\": \"Petrol column\", \"value\": \"Motor spirit:Premium unleaded / ULSP (Pence per litre)\" },\n          { \"key\": \"Diesel column\", \"value\": \"Derv: Diesel / ULSD (Pence per litre)\" },\n          { \"key\": \"Units\", \"value\": \"Pence per litre (p/l), annual averages\" },\n          { \"key\": \"Caveat\", \"value\": \"Petrol data unavailable for 1977\u20131988 (stored as non-numeric '..' in source).\" }\n        ]\n      },\n      \"children\": []\n    }\n  }\n}\n```",
+    "access_mode": "raw",
+    "base_url": "https://xlsx-song-agent-sandbox.ankcorn.workers.dev",
+    "endpoint": "https://xlsx-song-agent-sandbox.ankcorn.workers.dev/api/spreadsheets/5610ae0e-6ecc-4b7a-915f-2a2578aacc1c/agent-request",
+    "finish_reason": "stop",
+    "model_provider": "anthropic",
+    "model_name": "claude-sonnet-4-6",
+    "model_config": {
+      "fallbackModels": [],
+      "gatewayId": "aigovhack",
+      "model": "claude-sonnet-4-6",
+      "provider": "anthropic"
+    },
+    "request_id": "d1fec7d6-73d5-4305-ab28-ea11ad1ec69c",
+    "spreadsheet_id": "5610ae0e-6ecc-4b7a-915f-2a2578aacc1c",
+    "spreadsheet_filename": "fuel-and-oil-prices.csv",
+    "total_seconds": 50.562357666999986,
+    "upload_seconds": 2.3462557079999997,
+    "answer_seconds": 50.562349541,
+    "input_tokens": 6545,
+    "output_tokens": 2335,
+    "total_tokens": 8880,
+    "estimated_cost_usd": 0.05466,
+    "pricing": {
+      "currency": "USD",
+      "inputPer1MTokens": 3.0,
+      "modelKey": "anthropic:claude-sonnet-4-6",
+      "outputPer1MTokens": 15.0,
+      "pricingAvailable": true,
+      "unit": "1M tokens"
+    },
+    "usage": {
+      "inputTokens": 6545,
+      "inputTokenDetails": {
+        "noCacheTokens": 6545,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      },
+      "outputTokens": 2335,
+      "outputTokenDetails": {},
+      "totalTokens": 8880,
+      "raw": {
+        "input_tokens": 6545,
+        "output_tokens": 2335,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "service_tier": "standard",
+        "inference_geo": "global"
+      },
+      "cachedInputTokens": 0
+    },
+    "error": null
+  }
+]

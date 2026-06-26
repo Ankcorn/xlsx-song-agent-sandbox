@@ -1,0 +1,66 @@
+[
+  {
+    "prompt": "Which area or local authority has the highest reported personal-social skills outcome, and what is the value? Include the quarter/time period and cite the source sheet or columns used.",
+    "answer": null,
+    "access_mode": "sqlite",
+    "base_url": "https://xlsx-song-agent-sandbox.ankcorn.workers.dev",
+    "endpoint": "https://xlsx-song-agent-sandbox.ankcorn.workers.dev/api/spreadsheets/cbc24204-adaa-4e41-a95c-11fc8b69d47f/agent-request",
+    "finish_reason": null,
+    "model_provider": "anthropic",
+    "model_name": "claude-sonnet-4-6",
+    "model_config": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6"
+    },
+    "request_id": null,
+    "spreadsheet_id": "cbc24204-adaa-4e41-a95c-11fc8b69d47f",
+    "spreadsheet_filename": "quarter-1-to-quarter-4-2025-to-2026-child-development-data-provisional.ods",
+    "total_seconds": 39.037301917000036,
+    "upload_seconds": 2.055994458,
+    "answer_seconds": 0,
+    "input_tokens": null,
+    "output_tokens": null,
+    "total_tokens": null,
+    "estimated_cost_usd": null,
+    "pricing": {
+      "currency": "USD",
+      "modelKey": "anthropic:claude-sonnet-4-6",
+      "pricingAvailable": true,
+      "unit": "1M tokens"
+    },
+    "usage": null,
+    "error": "HTTP 500: No output generated."
+  },
+  {
+    "prompt": "Which area or local authority has the highest reported personal-social skills outcome, and what is the value? Include the quarter/time period and cite the source sheet or columns used.",
+    "answer": null,
+    "access_mode": "raw",
+    "base_url": "https://xlsx-song-agent-sandbox.ankcorn.workers.dev",
+    "endpoint": "https://xlsx-song-agent-sandbox.ankcorn.workers.dev/api/spreadsheets/cbc24204-adaa-4e41-a95c-11fc8b69d47f/agent-request",
+    "finish_reason": null,
+    "model_provider": "anthropic",
+    "model_name": "claude-sonnet-4-6",
+    "model_config": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6"
+    },
+    "request_id": null,
+    "spreadsheet_id": "cbc24204-adaa-4e41-a95c-11fc8b69d47f",
+    "spreadsheet_filename": "quarter-1-to-quarter-4-2025-to-2026-child-development-data-provisional.ods",
+    "total_seconds": 46.230622916000016,
+    "upload_seconds": 2.055994458,
+    "answer_seconds": 0,
+    "input_tokens": null,
+    "output_tokens": null,
+    "total_tokens": null,
+    "estimated_cost_usd": null,
+    "pricing": {
+      "currency": "USD",
+      "modelKey": "anthropic:claude-sonnet-4-6",
+      "pricingAvailable": true,
+      "unit": "1M tokens"
+    },
+    "usage": null,
+    "error": "HTTP 500: No output generated."
+  }
+]

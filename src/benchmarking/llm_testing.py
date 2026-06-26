@@ -33,6 +33,7 @@ MODEL_PRICES_PER_1M_TOKENS = {
     "openai:gpt-5.5": {"input": 5.00, "output": 30.00},
     "workers-ai:@cf/moonshotai/kimi-k2.7-code": {"input": 0.95, "output": 4.00},
 }
+APP_USER_AGENT = "xlsx-song-agent-sandbox-benchmark/1.0"
 
 
 @dataclass
@@ -159,7 +160,7 @@ def post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
     http_request = request.Request(
         url,
         data=body,
-        headers={"content-type": "application/json", "accept": "application/json"},
+        headers={"content-type": "application/json", "accept": "application/json", "user-agent": APP_USER_AGENT},
         method="POST",
     )
     return read_json_response(http_request)
@@ -168,7 +169,7 @@ def post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
 def get_json(url: str) -> dict[str, Any]:
     http_request = request.Request(
         url,
-        headers={"accept": "application/json"},
+        headers={"accept": "application/json", "user-agent": APP_USER_AGENT},
         method="GET",
     )
     return read_json_response(http_request)
@@ -192,6 +193,7 @@ def upload_spreadsheet(base_url: str, spreadsheet_path: Path, pre_extract: bool)
             "accept": "application/json",
             "content-length": str(len(body)),
             "content-type": f"multipart/form-data; boundary={boundary}",
+            "user-agent": APP_USER_AGENT,
         },
         method="POST",
     )
