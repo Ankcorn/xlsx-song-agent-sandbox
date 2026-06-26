@@ -308,7 +308,7 @@
   }
 
   .upload-page.is-processing {
-    @apply mx-auto grid h-[calc(100vh-4rem)] w-full max-w-6xl grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden px-8 py-6;
+    @apply mx-auto grid h-[calc(100vh-4rem)] w-full max-w-[96rem] grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden px-8 py-6;
   }
 
   .upload-processing {
@@ -339,64 +339,158 @@
     @apply text-xs font-semibold uppercase tracking-wide text-zinc-500;
   }
 
-  .upload-steps {
-    @apply grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-4 overflow-hidden rounded-xl border border-zinc-200 bg-zinc-100 p-5;
+  .upload-trace-workbench {
+    @apply grid min-h-0 grid-cols-[minmax(0,1.35fr)_minmax(360px,0.65fr)] gap-4;
   }
 
-  .upload-steps header {
-    @apply flex items-end justify-between gap-4;
+  .upload-trace-list,
+  .upload-trace-detail {
+    @apply min-h-0 overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm;
   }
 
-  .upload-steps header h2 {
-    @apply text-xl font-semibold text-zinc-950;
+  .upload-trace-list {
+    @apply grid grid-rows-[auto_minmax(0,1fr)];
   }
 
-  .upload-step-list {
-    @apply grid min-h-0 gap-3 overflow-y-auto overscroll-contain pr-2;
+  .upload-trace-list header,
+  .upload-trace-detail header {
+    @apply flex items-start justify-between gap-4 border-b border-zinc-200 p-4;
   }
 
-  .upload-step-card {
-    @apply grid grid-cols-[8rem_minmax(0,1fr)] gap-4 rounded-xl border border-zinc-200 bg-white p-4 shadow-sm;
+  .upload-trace-list h2,
+  .upload-trace-detail h2 {
+    @apply text-lg font-semibold leading-tight text-zinc-950;
   }
 
-  .upload-step-card.running {
-    @apply border-amber-300 bg-amber-50/40;
+  .trace-metrics {
+    @apply flex max-w-xl flex-wrap justify-end gap-2 text-xs font-medium text-zinc-500;
   }
 
-  .upload-step-card.done {
-    @apply border-teal-500 bg-teal-50/40;
+  .trace-metrics span {
+    @apply rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1;
   }
 
-  .upload-step-card.error {
-    @apply border-red-500 bg-red-50/60;
+  .trace-metrics strong {
+    @apply font-semibold text-zinc-950;
   }
 
-  .upload-step-status {
-    @apply flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500;
+  .trace-metrics .error {
+    @apply border-red-200 bg-red-50 text-red-700;
   }
 
-  .upload-step-body {
-    @apply min-w-0;
+  .upload-trace-table-wrap {
+    @apply min-h-0 overflow-auto;
   }
 
-  .upload-step-card h3 {
-    @apply text-base font-semibold leading-snug text-zinc-950;
+  .upload-trace-table {
+    @apply w-full min-w-[820px] border-separate border-spacing-0 text-sm;
   }
 
-  .upload-step-type,
-  .upload-step-summary {
-    @apply text-sm leading-relaxed text-zinc-600;
+  .upload-trace-table th {
+    @apply sticky top-0 z-10 border-b border-zinc-200 bg-zinc-50 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500;
   }
 
-  .upload-step-type {
-    @apply mt-1 font-semibold uppercase tracking-wide text-zinc-500;
+  .upload-trace-table td {
+    @apply border-b border-zinc-100 px-3 py-3 align-top text-zinc-700;
   }
 
-  .upload-step-summary {
-    @apply mt-3 max-w-4xl;
+  .upload-trace-table tr {
+    @apply cursor-pointer transition-colors;
   }
 
-  .upload-step-card pre,
+  .upload-trace-table tbody tr:hover,
+  .upload-trace-table tbody tr.is-selected {
+    @apply bg-zinc-50;
+  }
+
+  .upload-trace-table tbody tr.is-selected td:first-child {
+    @apply shadow-[inset_3px_0_0_rgb(9_9_11)];
+  }
+
+  .upload-trace-table td:first-child {
+    @apply w-36 font-medium text-zinc-950;
+  }
+
+  .upload-trace-table td:first-child span:last-child {
+    @apply block truncate text-xs font-semibold uppercase tracking-wide text-zinc-500;
+  }
+
+  .upload-trace-table td:nth-child(4),
+  .upload-trace-table td:nth-child(5) {
+    @apply whitespace-nowrap font-mono text-xs;
+  }
+
+  .upload-trace-table strong {
+    @apply block text-sm font-semibold leading-snug text-zinc-950;
+  }
+
+  .upload-trace-table small {
+    @apply mt-1 block max-w-2xl overflow-hidden text-xs leading-relaxed text-zinc-500;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  .trace-step-index {
+    @apply mb-1 inline-flex size-7 items-center justify-center rounded-md bg-zinc-100 text-xs font-semibold text-zinc-700;
+  }
+
+  .trace-status-pill {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-xs font-semibold capitalize text-zinc-600;
+  }
+
+  .trace-status-pill.done {
+    @apply border-teal-200 bg-teal-50 text-teal-700;
+  }
+
+  .trace-status-pill.running {
+    @apply border-amber-200 bg-amber-50 text-amber-700;
+  }
+
+  .trace-status-pill.error {
+    @apply border-red-200 bg-red-50 text-red-700;
+  }
+
+  .upload-trace-detail {
+    @apply grid grid-rows-[auto_auto_minmax(0,1fr)];
+  }
+
+  .trace-detail-grid {
+    @apply grid grid-cols-2 gap-px border-b border-zinc-200 bg-zinc-200;
+  }
+
+  .trace-detail-grid div {
+    @apply min-w-0 bg-white p-3;
+  }
+
+  .trace-detail-grid dt {
+    @apply text-xs font-semibold uppercase tracking-wide text-zinc-500;
+  }
+
+  .trace-detail-grid dd {
+    @apply mt-1 break-words text-sm font-medium text-zinc-800;
+  }
+
+  .trace-payload-panel {
+    @apply grid min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden;
+  }
+
+  .trace-payload-header {
+    @apply flex items-center justify-between border-b border-zinc-200 px-4 py-3;
+  }
+
+  .trace-payload-header h3 {
+    @apply text-sm font-semibold text-zinc-950;
+  }
+
+  .trace-payload-header span {
+    @apply rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-semibold text-zinc-500;
+  }
+
+  .trace-payload-panel pre {
+    @apply min-h-0 overflow-auto bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-100 whitespace-pre-wrap break-words;
+  }
+
   .trace-item pre {
     @apply mt-3 max-h-80 overflow-auto rounded-md border border-zinc-200 bg-white p-4 text-xs leading-relaxed text-zinc-700 whitespace-pre-wrap break-words;
   }
@@ -1151,7 +1245,7 @@
     }
 
     .upload-processing-summary,
-    .upload-step-card {
+    .upload-trace-workbench {
       @apply grid-cols-1;
     }
 
@@ -1159,7 +1253,12 @@
       @apply grid-cols-6 text-left;
     }
 
-    .upload-step-status {
+    .upload-trace-list header,
+    .upload-trace-detail header {
+      @apply flex-col;
+    }
+
+    .trace-metrics {
       @apply justify-start;
     }
 

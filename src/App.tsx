@@ -286,6 +286,68 @@ function traceDetailParts(detail: string | null) {
   }
 }
 
+function parseTraceDetail(detail: string | null) {
+  if (!detail) return null;
+  try {
+    return JSON.parse(detail) as unknown;
+  } catch {
+    return detail;
+  }
+}
+
+function traceSummary(detail: string | null) {
+  const parsed = parseTraceDetail(detail);
+  if (typeof parsed === "string") return parsed;
+  if (typeof parsed === "object" && parsed !== null && "summary" in parsed) {
+    const summary = (parsed as Record<string, unknown>).summary;
+    return typeof summary === "string" ? summary : null;
+  }
+  return null;
+}
+
+function traceKeyValues(trace: AgentTrace) {
+  const parsed = parseTraceDetail(trace.detail);
+  const base: Array<[string, string]> = [
+    ["Status", trace.status],
+    ["Component", trace.span_type],
+    ["Step", trace.step_number === null ? "Unnumbered" : String(trace.step_number)],
+    ["Started", formatTraceTime(trace.created_at)],
+    ["Duration", formatDuration(trace.duration_ms)],
+  ];
+  if (typeof parsed === "object" && parsed !== null) {
+    const record = parsed as Record<string, unknown>;
+    for (const [key, value] of Object.entries(record)) {
+      if (key === "summary" || key === "snippet") continue;
+      if (value === null || value === undefined || typeof value === "object") continue;
+      base.push([humanizeTraceKey(key), String(value)]);
+    }
+  }
+  return base.slice(0, 10);
+}
+
+function tracePayload(trace: AgentTrace) {
+  const parsed = parseTraceDetail(trace.detail);
+  if (parsed === null) return "No payload captured for this event.";
+  if (typeof parsed === "string") return parsed;
+  return JSON.stringify(parsed, null, 2);
+}
+
+function humanizeTraceKey(value: string) {
+  return value.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatTraceTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function formatDuration(value: number | null) {
+  if (value === null) return "—";
+  if (value < 1000) return `${value} ms`;
+  return `${(value / 1000).toFixed(value < 10000 ? 2 : 1)} s`;
+}
+
 function isAgentTraceMessage(value: unknown): value is AgentTraceMessage {
   return (
     typeof value === "object" &&
@@ -740,6 +802,7 @@ function UploadPage() {
   const [uploadAgentName, setUploadAgentName] = useState<string | null>(null);
   const [uploadSpreadsheetId, setUploadSpreadsheetId] = useState<string | null>(null);
   const [uploadTraces, setUploadTraces] = useState<AgentTrace[]>([]);
+  const [selectedUploadTraceId, setSelectedUploadTraceId] = useState<string | null>(null);
   useAgent({
     agent: "SheetsThink",
     enabled: Boolean(uploadAgentName),
@@ -787,10 +850,22 @@ function UploadPage() {
     };
   }, [uploadAgentName, uploadSpreadsheetId]);
 
+  useEffect(() => {
+    if (uploadTraces.length === 0) {
+      setSelectedUploadTraceId(null);
+      return;
+    }
+    setSelectedUploadTraceId((current) => {
+      if (current && uploadTraces.some((trace) => trace.id === current)) return current;
+      return uploadTraces[uploadTraces.length - 1]?.id ?? null;
+    });
+  }, [uploadTraces]);
+
   function selectFile(nextFile: File | null) {
     setFile(nextFile);
     setError(null);
     setUploadTraces([]);
+    setSelectedUploadTraceId(null);
     setUploadSpreadsheetId(null);
     setUploadAgentName(null);
   }
@@ -868,8 +943,11 @@ function UploadPage() {
 
   const hasUploadStarted = isUploading || uploadTraces.length > 0 || Boolean(uploadSpreadsheetId);
   const latestTrace = uploadTraces[uploadTraces.length - 1] ?? null;
+  const selectedUploadTrace = uploadTraces.find((trace) => trace.id === selectedUploadTraceId) ?? latestTrace;
   const completedTraceCount = uploadTraces.filter((trace) => trace.status === "done").length;
   const runningTraceCount = uploadTraces.filter((trace) => trace.status === "running").length;
+  const erroredTraceCount = uploadTraces.filter((trace) => trace.status === "error").length;
+  const totalTraceDuration = uploadTraces.reduce((total, trace) => total + (trace.duration_ms ?? 0), 0);
 
   return (
     <section className={`content-band upload-page ${hasUploadStarted ? "is-processing" : "narrow"}`}>
@@ -952,36 +1030,107 @@ function UploadPage() {
 
           {error ? <Banner variant="error" title="Upload failed" description={error} /> : null}
 
-          <div className="upload-steps">
-            <header>
-              <p className="eyebrow">{preExtract ? "Analysis" : "Upload"}</p>
-              <h2>{latestTrace?.title ?? (preExtract ? "Preparing spreadsheet agent" : "Storing spreadsheet file")}</h2>
-            </header>
-            <ol className="upload-step-list" aria-label="Upload and analysis steps">
-              {uploadTraces.map((trace) => {
-                const detail = traceDetailParts(trace.detail);
-                return (
-                  <li className={`upload-step-card ${trace.status}`} key={trace.id}>
-                    <div className="upload-step-status">
+          <div className="upload-trace-workbench">
+            <section className="upload-trace-list" aria-label="Upload and analysis events">
+              <header>
+                <div>
+                  <p className="eyebrow">{preExtract ? "Live analysis trace" : "Live upload trace"}</p>
+                  <h2>{latestTrace?.title ?? (preExtract ? "Preparing spreadsheet agent" : "Storing spreadsheet file")}</h2>
+                </div>
+                <div className="trace-metrics" aria-label="Trace summary">
+                  <span><strong>{uploadTraces.length}</strong> events</span>
+                  <span><strong>{completedTraceCount}</strong> done</span>
+                  <span><strong>{runningTraceCount}</strong> running</span>
+                  {erroredTraceCount > 0 ? <span className="error"><strong>{erroredTraceCount}</strong> errors</span> : null}
+                  <span><strong>{formatDuration(totalTraceDuration)}</strong> captured</span>
+                </div>
+              </header>
+
+              <div className="upload-trace-table-wrap">
+                <table className="upload-trace-table">
+                  <thead>
+                    <tr>
+                      <th>Step</th>
+                      <th>Status</th>
+                      <th>Event</th>
+                      <th>Started</th>
+                      <th>Duration</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {uploadTraces.map((trace) => {
+                      const isSelected = selectedUploadTrace?.id === trace.id;
+                      const summary = traceSummary(trace.detail);
+                      return (
+                        <tr
+                          aria-selected={isSelected}
+                          className={`${trace.status} ${isSelected ? "is-selected" : ""}`}
+                          key={trace.id}
+                          onClick={() => setSelectedUploadTraceId(trace.id)}
+                        >
+                          <td>
+                            <span className="trace-step-index">{trace.step_number ?? "—"}</span>
+                            <span>{trace.span_type}</span>
+                          </td>
+                          <td>
+                            <span className={`trace-status-pill ${trace.status}`}>
+                              <span className="trace-dot" />
+                              {trace.status}
+                            </span>
+                          </td>
+                          <td>
+                            <strong>{trace.title}</strong>
+                            {summary ? <small>{summary}</small> : null}
+                          </td>
+                          <td>{formatTraceTime(trace.created_at)}</td>
+                          <td>{formatDuration(trace.duration_ms)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <aside className="upload-trace-detail">
+              {selectedUploadTrace ? (
+                <>
+                  <header>
+                    <div>
+                      <p className="eyebrow">Selected event</p>
+                      <h2>{selectedUploadTrace.title}</h2>
+                    </div>
+                    <span className={`trace-status-pill ${selectedUploadTrace.status}`}>
                       <span className="trace-dot" />
-                      <span>{trace.status}</span>
-                    </div>
-                    <div className="upload-step-body">
-                      <div className="trace-title-row">
-                        <h3>{trace.title}</h3>
-                        {trace.duration_ms ? <span>{trace.duration_ms}ms</span> : null}
+                      {selectedUploadTrace.status}
+                    </span>
+                  </header>
+                  <dl className="trace-detail-grid">
+                    {traceKeyValues(selectedUploadTrace).map(([label, value]) => (
+                      <div key={label}>
+                        <dt>{label}</dt>
+                        <dd>{value}</dd>
                       </div>
-                      <p className="upload-step-type">
-                        {trace.span_type}
-                        {trace.step_number !== null ? ` · step ${trace.step_number}` : ""}
-                      </p>
-                      {detail.summary ? <p className="upload-step-summary">{detail.summary}</p> : null}
-                      {detail.snippet ? <pre>{detail.snippet}</pre> : detail.raw ? <pre>{detail.raw}</pre> : null}
+                    ))}
+                  </dl>
+                  <div className="trace-payload-panel">
+                    <div className="trace-payload-header">
+                      <h3>Payload</h3>
+                      <span>JSON</span>
                     </div>
-                  </li>
-                );
-              })}
-            </ol>
+                    <pre>{tracePayload(selectedUploadTrace)}</pre>
+                  </div>
+                </>
+              ) : (
+                <Empty
+                  className="viewer-empty"
+                  icon={<Clock size={32} />}
+                  size="sm"
+                  title="Waiting for trace events"
+                  description="Events will appear here as the upload starts."
+                />
+              )}
+            </aside>
           </div>
         </section>
       )}
