@@ -1443,20 +1443,29 @@ async function searchLocalDataset(env: Env, message: string) {
 }
 
 async function searchDataGov(message: string) {
-  const url = new URL("https://data.gov.uk/api/action/package_search");
-  url.searchParams.set("q", message);
-  url.searchParams.set("rows", "20");
+  const packages: DataGovPackage[] = [];
+  const seenPackages = new Set<string>();
+  for (const query of dataGovSearchQueries(message)) {
+    const url = new URL("https://data.gov.uk/api/action/package_search");
+    url.searchParams.set("q", query);
+    url.searchParams.set("rows", "20");
 
-  const response = await fetch(url, {
-    headers: { accept: "application/json", "user-agent": "xlsx-song-agent-sandbox/1.0" },
-  });
-  if (!response.ok) throw new Error(`data.gov.uk search failed with ${response.status}`);
+    const response = await fetch(url, {
+      headers: { accept: "application/json", "user-agent": "xlsx-song-agent-sandbox/1.0" },
+    });
+    if (!response.ok) throw new Error(`data.gov.uk search failed with ${response.status}`);
 
-  const data = (await response.json()) as {
-    result?: { results?: DataGovPackage[] };
-    success?: boolean;
-  };
-  const packages = data.result?.results ?? [];
+    const data = (await response.json()) as {
+      result?: { results?: DataGovPackage[] };
+      success?: boolean;
+    };
+    for (const dataset of data.result?.results ?? []) {
+      const key = dataset.id ?? dataset.title ?? JSON.stringify(dataset).slice(0, 120);
+      if (seenPackages.has(key)) continue;
+      seenPackages.add(key);
+      packages.push(dataset);
+    }
+  }
   const resources = packages.flatMap((dataset) =>
     (dataset.resources ?? [])
       .filter(supportedResource)
@@ -1480,6 +1489,20 @@ async function searchDataGov(message: string) {
   );
   resources.sort((a, b) => b.score - a.score);
   return { packages, resources };
+}
+
+function dataGovSearchQueries(message: string) {
+  const original = message.trim();
+  const simplified = original
+    .toLowerCase()
+    .replace(/[?!.]/g, " ")
+    .replace(/\b(what|which|who|when|where|why|how|many|much|is|are|was|were|the|a|an|of|for|to|over|last|current|latest|recent)\b/g, " ")
+    .replace(/\b(in|across|within|throughout)\s+(the\s+)?(uk|u k|united kingdom|great britain|britain)\b/g, " ")
+    .replace(/\b(uk|u k|united kingdom|great britain|britain)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const queries = [simplified, original].filter((query) => query.length >= 3);
+  return Array.from(new Set(queries)).slice(0, 3);
 }
 
 function dataGovCandidateId(index: number) {
@@ -1544,6 +1567,7 @@ async function selectAskDataCandidate(
         "Reject candidates that match topic words but have the wrong geography, time period, metric, or granularity.",
         "For UK-wide or national questions, do not choose local council, city, school, borough, or single-place datasets unless the user explicitly asks for that place.",
         "Prefer datasets that can directly answer the question over datasets that are only loosely related.",
+        "Choose none only when every candidate is clearly unsuitable; if a candidate can support the answer after filtering, aggregation, or calculation, choose it.",
         "When a data.gov.uk candidate and a local candidate are equally suitable, prefer data.gov.uk because this workflow is for discovering open government data.",
         "",
         `Question: ${message}`,
@@ -1566,7 +1590,7 @@ async function selectAskDataCandidate(
 
     if (source === "local") {
       const selected = local.ranked.find((item) => item.candidate.id === id) ?? local.ranked[0];
-      if (selected && score >= 0.45) {
+      if (selected && score >= 0.3) {
         return {
           candidates,
           durationMs: Date.now() - startedAt,
@@ -1582,7 +1606,7 @@ async function selectAskDataCandidate(
     if (source === "data.gov.uk") {
       const index = Number(id.replace(/^data-gov-/, ""));
       const selected = Number.isInteger(index) ? external.resources[index] : external.resources[0];
-      if (selected && score >= 0.45) {
+      if (selected && score >= 0.3) {
         return {
           candidates,
           durationMs: Date.now() - startedAt,
