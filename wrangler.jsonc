@@ -29,6 +29,7 @@
     // Set ELEVENLABS_API_KEY as a secret. Optional: override these defaults for a different voice/model.
     "ELEVENLABS_VOICE_ID": "JBFqnCBsd6RMkjVDRZzb",
     "ELEVENLABS_MODEL_ID": "eleven_multilingual_v2",
+    "ELEVENLABS_MUSIC_MODEL_ID": "music_v2",
     "ELEVENLABS_OUTPUT_FORMAT": "mp3_44100_128"
   },
   "d1_databases": [

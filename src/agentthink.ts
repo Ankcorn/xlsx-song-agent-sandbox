@@ -693,7 +693,7 @@ export class AgentThink extends Think<Env> {
     const finalPrompt =
       prompt ||
       "Create a catchy, data-driven song from this agent's current datasets. Pull out memorable facts, trends, and caveats from the SQL snapshot and turn them into lyrics.";
-    const modelId = this.env.ELEVENLABS_MODEL_ID || "music_v1";
+    const modelId = this.env.ELEVENLABS_MUSIC_MODEL_ID || "music_v2";
     const outputFormat = this.env.ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128";
     const musicLengthMs = Math.max(10_000, Math.min(120_000, lengthMs ?? 45_000));
     const language = requestedLanguage && requestedLanguage !== "Custom / prompt decides" ? requestedLanguage : "Custom / prompt decides";

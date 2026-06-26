@@ -13,7 +13,7 @@ Open http://localhost:5173/.
 
 The first run needs a Docker-compatible daemon, such as OrbStack or Docker Desktop, because Cloudflare Sandbox runs as a local container in development. The first container pull can take a minute.
 
-To enable ElevenLabs speech playback in the chat UIs, set `ELEVENLABS_API_KEY` in `.dev.vars` for local development or with `npx wrangler secret put ELEVENLABS_API_KEY` before deploy. Optional `ELEVENLABS_VOICE_ID`, `ELEVENLABS_MODEL_ID`, and `ELEVENLABS_OUTPUT_FORMAT` defaults are in `wrangler.jsonc`.
+To enable ElevenLabs speech playback and agent song generation, set `ELEVENLABS_API_KEY` in `.dev.vars` for local development or with `npx wrangler secret put ELEVENLABS_API_KEY` before deploy. Optional `ELEVENLABS_VOICE_ID`, `ELEVENLABS_MODEL_ID` (speech), `ELEVENLABS_MUSIC_MODEL_ID` (songs), and `ELEVENLABS_OUTPUT_FORMAT` defaults are in `wrangler.jsonc`.
 
 ## Smoke test
 

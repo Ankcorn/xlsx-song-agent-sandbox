@@ -17,6 +17,7 @@ export type Env = {
   ASSETS: Fetcher;
   DB: D1Database;
   ELEVENLABS_API_KEY?: string;
+  ELEVENLABS_MUSIC_MODEL_ID?: string;
   ELEVENLABS_MODEL_ID?: string;
   ELEVENLABS_OUTPUT_FORMAT?: string;
   ELEVENLABS_VOICE_ID?: string;
