@@ -34,6 +34,7 @@ import {
   Table2,
   Trash2,
   Upload,
+  Volume2,
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -439,10 +440,73 @@ function isJsonRenderStreamCandidate(text: string) {
 function ChatMessage({ isStreaming = false, message }: { isStreaming?: boolean; message: RenderedMessage }) {
   const spec = message.role === "assistant" ? parseJsonRenderSpec(message.text) : null;
   const isRenderingJson = message.role === "assistant" && isStreaming && !spec && isJsonRenderStreamCandidate(message.text);
+  const [speechError, setSpeechError] = useState<string | null>(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
+  const canSpeak = message.role === "assistant" && !isStreaming && message.text.trim().length > 0;
+
+  useEffect(() => {
+    return () => {
+      audioRef.current?.pause();
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    };
+  }, []);
+
+  async function speakMessage() {
+    if (!canSpeak || isSpeaking) return;
+    setSpeechError(null);
+    setIsSpeaking(true);
+
+    try {
+      audioRef.current?.pause();
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+
+      const response = await fetch("/api/speech", {
+        body: JSON.stringify({ text: message.text }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error || "Speech generation failed.");
+      }
+
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const audio = new Audio(objectUrl);
+      audioRef.current = audio;
+      objectUrlRef.current = objectUrl;
+      audio.onended = () => setIsSpeaking(false);
+      audio.onerror = () => {
+        setSpeechError("Could not play generated speech.");
+        setIsSpeaking(false);
+      };
+      await audio.play();
+    } catch (caught) {
+      setSpeechError(caught instanceof Error ? caught.message : "Speech generation failed.");
+      setIsSpeaking(false);
+    }
+  }
 
   return (
     <article className={`message ${message.role}`}>
-      <span>{message.role}</span>
+      <div className="message-header">
+        <span>{message.role}</span>
+        {canSpeak ? (
+          <button
+            aria-label={isSpeaking ? "Playing speech" : "Play speech"}
+            className="speech-button"
+            disabled={isSpeaking}
+            title={isSpeaking ? "Playing speech" : "Play speech"}
+            type="button"
+            onClick={() => void speakMessage()}
+          >
+            {isSpeaking ? <Loader size="sm" /> : <Volume2 size={15} />}
+          </button>
+        ) : null}
+      </div>
       {spec ? (
         <div className="json-render-message">
           <JsonRenderReport spec={spec} />
@@ -458,6 +522,7 @@ function ChatMessage({ isStreaming = false, message }: { isStreaming?: boolean; 
       ) : (
         <p>{message.text}</p>
       )}
+      {speechError ? <p className="speech-error">{speechError}</p> : null}
     </article>
   );
 }

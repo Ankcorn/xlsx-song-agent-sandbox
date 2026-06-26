@@ -16,6 +16,10 @@ export type Env = {
   AI_GATEWAY_PROVIDER?: string;
   ASSETS: Fetcher;
   DB: D1Database;
+  ELEVENLABS_API_KEY?: string;
+  ELEVENLABS_MODEL_ID?: string;
+  ELEVENLABS_OUTPUT_FORMAT?: string;
+  ELEVENLABS_VOICE_ID?: string;
   EXTRACTION_WORKFLOW: Workflow;
   HackathonAgent: any;
   LOADER: WorkerLoader;
@@ -99,6 +103,10 @@ export type AgentRequestPayload = {
   agentName?: unknown;
   message?: unknown;
   spreadsheetId?: unknown;
+};
+
+type SpeechPayload = {
+  text?: unknown;
 };
 
 type SpreadsheetSearchCandidate = {
@@ -949,6 +957,48 @@ async function sendBenchmarkQuery(request: Request, env: Env) {
   }
 }
 
+async function createSpeech(request: Request, env: Env) {
+  const apiKey = env.ELEVENLABS_API_KEY;
+  if (!apiKey) {
+    return json({ error: "ELEVENLABS_API_KEY is not configured." }, { status: 503 });
+  }
+
+  const body = (await request.json().catch(() => ({}))) as SpeechPayload;
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  if (!text) return json({ error: "Send JSON with a non-empty 'text' string." }, { status: 400 });
+
+  const voiceId = env.ELEVENLABS_VOICE_ID || "JBFqnCBsd6RMkjVDRZzb";
+  const modelId = env.ELEVENLABS_MODEL_ID || "eleven_multilingual_v2";
+  const outputFormat = env.ELEVENLABS_OUTPUT_FORMAT || "mp3_44100_128";
+  const speechUrl = new URL(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`);
+  speechUrl.searchParams.set("output_format", outputFormat);
+
+  const response = await fetch(speechUrl, {
+    body: JSON.stringify({
+      model_id: modelId,
+      text: text.slice(0, 5000),
+    }),
+    headers: {
+      "content-type": "application/json",
+      "xi-api-key": apiKey,
+    },
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    return json({ error: errorText || "ElevenLabs speech generation failed." }, { status: response.status });
+  }
+
+  return new Response(response.body, {
+    headers: {
+      "cache-control": "no-store",
+      "content-type": response.headers.get("content-type") || "audio/mpeg",
+    },
+    status: 200,
+  });
+}
+
 async function selectSpreadsheetForPrompt(env: Env, message: string) {
   const candidates = await spreadsheetSearchCandidates(env);
   if (candidates.length === 0) {
@@ -1388,6 +1438,10 @@ export default {
 
     if (url.pathname === "/api/benchmarks/query" && request.method === "POST") {
       return sendBenchmarkQuery(request, env);
+    }
+
+    if (url.pathname === "/api/speech" && request.method === "POST") {
+      return createSpeech(request, env);
     }
 
     if (url.pathname === "/api/spreadsheets" && request.method === "GET") {
