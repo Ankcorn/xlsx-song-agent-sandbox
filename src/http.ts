@@ -1509,6 +1509,14 @@ function dataGovCandidateId(index: number) {
   return `data-gov-${index}`;
 }
 
+function sameDataGovResource(left: { dataset: DataGovPackage; resource: DataGovResource }, right: { dataset: DataGovPackage; resource: DataGovResource }) {
+  return (
+    (left.resource.id && right.resource.id && left.resource.id === right.resource.id) ||
+    (left.resource.url && right.resource.url && left.resource.url === right.resource.url) ||
+    (left.dataset.id && right.dataset.id && left.dataset.id === right.dataset.id && left.resource.name && right.resource.name && left.resource.name === right.resource.name)
+  );
+}
+
 async function selectAskDataCandidate(
   env: Env,
   message: string,
@@ -1690,6 +1698,33 @@ async function importDataGovResource(env: Env, message: string, dataset: DataGov
   return getSpreadsheetRow(env, spreadsheetId);
 }
 
+async function importFirstAvailableDataGovResource(
+  env: Env,
+  message: string,
+  selected: { dataset: DataGovPackage; resource: DataGovResource },
+  rankedResources: Array<{ dataset: DataGovPackage; resource: DataGovResource; score: number }>,
+) {
+  const attempts = [
+    selected,
+    ...rankedResources.filter((item) => !sameDataGovResource(item, selected)).slice(0, 8),
+  ];
+  const failures: Array<{ resource: string; error: string }> = [];
+
+  for (const attempt of attempts) {
+    try {
+      const spreadsheet = await importDataGovResource(env, message, attempt.dataset, attempt.resource);
+      return { attempt, failures, spreadsheet };
+    } catch (error) {
+      failures.push({
+        error: error instanceof Error ? error.message : String(error),
+        resource: attempt.resource.name ?? attempt.resource.url ?? attempt.dataset.title ?? "data.gov.uk resource",
+      });
+    }
+  }
+
+  throw new Error(`No selected data.gov.uk resources could be downloaded. ${failures.map((failure) => `${failure.resource}: ${failure.error}`).join("; ")}`);
+}
+
 async function answerImportedDatasetRequest(request: Request, env: Env) {
   const body = (await request.json().catch(() => ({}))) as DatasetAgentPendingPayload;
   if (typeof body.message !== "string" || !body.message.trim()) {
@@ -1843,12 +1878,19 @@ async function sendDatasetAgentRequest(request: Request, env: Env) {
       title: "Selected data.gov.uk resource",
     };
     steps.push({ status: "running", title: "Importing data.gov.uk file" });
-    const imported = await importDataGovResource(env, message, best.dataset, best.resource);
+    const importResult = await importFirstAvailableDataGovResource(env, message, best, external.resources);
+    const imported = importResult.spreadsheet;
+    const importedResource = importResult.attempt;
     if (!imported) throw new Error("Imported spreadsheet could not be loaded.");
     if (imported.status !== "ready") {
       const isFailed = imported?.status === "failed";
       steps[steps.length - 1] = {
-        detail: { error: imported?.error_message ?? null, status: imported?.status ?? "unknown" },
+        detail: {
+          error: imported?.error_message ?? null,
+          fallbackFailures: importResult.failures,
+          resource: importedResource.resource.name ?? importedResource.dataset.title,
+          status: imported?.status ?? "unknown",
+        },
         status: isFailed ? "error" : "running",
         title: isFailed ? "Imported dataset processing failed" : "Imported dataset processing in background",
       };
@@ -1860,8 +1902,8 @@ async function sendDatasetAgentRequest(request: Request, env: Env) {
         model: modelConfig(env, selectedModel),
         requestId: crypto.randomUUID(),
         response: isFailed
-          ? `I found and imported ${best.dataset.title ?? best.resource.name ?? "a data.gov.uk dataset"}, but processing failed before I could answer.`
-          : `I found and imported ${best.dataset.title ?? best.resource.name ?? "a data.gov.uk dataset"}. ${selection.reason} I am processing it in the background and will answer when it is ready.`,
+          ? `I found and imported ${importedResource.dataset.title ?? importedResource.resource.name ?? "a data.gov.uk dataset"}, but processing failed before I could answer.`
+          : `I found and imported ${importedResource.dataset.title ?? importedResource.resource.name ?? "a data.gov.uk dataset"}. ${selection.reason} I am processing it in the background and will answer when it is ready.`,
         selectedSpreadsheet: { filename: imported.filename, id: imported.id, reason: selection.reason, score: selection.score },
         selection: {
           candidates: selection.candidates,
@@ -1877,7 +1919,16 @@ async function sendDatasetAgentRequest(request: Request, env: Env) {
       });
     }
 
-    steps[steps.length - 1] = { detail: { filename: imported.filename, id: imported.id }, status: "done", title: "Imported dataset and created agent" };
+    steps[steps.length - 1] = {
+      detail: {
+        fallbackFailures: importResult.failures,
+        filename: imported.filename,
+        id: imported.id,
+        resource: importedResource.resource.name ?? importedResource.dataset.title,
+      },
+      status: "done",
+      title: "Imported dataset and created agent",
+    };
     const answer = await fetchAgentMessageData(env, imported.agent_name, message, selectedModel);
     const data = answer.data && typeof answer.data === "object" ? answer.data : { response: answer.data };
     const responseText = typeof (data as { response?: unknown }).response === "string" ? (data as { response: string }).response : "";
