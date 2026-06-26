@@ -974,6 +974,75 @@
     @apply mt-3 max-h-96 overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 p-4 text-xs leading-relaxed text-zinc-700 whitespace-pre-wrap break-words;
   }
 
+  .api-page {
+    @apply grid gap-5;
+  }
+
+  .api-summary-grid {
+    @apply grid gap-3 md:grid-cols-3;
+  }
+
+  .api-summary-grid article,
+  .api-endpoint-card,
+  .api-table-card {
+    @apply rounded-xl border border-zinc-200 bg-white p-5 shadow-sm;
+  }
+
+  .api-summary-grid article {
+    @apply grid gap-2;
+  }
+
+  .api-summary-grid svg {
+    @apply text-zinc-500;
+  }
+
+  .api-summary-grid span {
+    @apply text-sm font-medium text-zinc-500;
+  }
+
+  .api-summary-grid strong {
+    @apply text-2xl font-semibold leading-tight text-zinc-950;
+  }
+
+  .api-endpoint-card,
+  .api-table-list,
+  .api-table-card,
+  .api-endpoint-stack {
+    @apply grid gap-3;
+  }
+
+  .api-table-card header {
+    @apply flex flex-wrap items-start justify-between gap-3;
+  }
+
+  .api-endpoint {
+    @apply grid grid-cols-[8rem_minmax(0,1fr)_auto] items-center gap-3 rounded-lg border border-zinc-200 bg-zinc-50 p-2.5;
+  }
+
+  .api-endpoint span {
+    @apply text-xs font-semibold uppercase tracking-wide text-zinc-500;
+  }
+
+  .api-endpoint code {
+    @apply min-w-0 overflow-hidden text-ellipsis whitespace-nowrap rounded-md bg-white px-2 py-1.5 font-mono text-xs text-zinc-700;
+  }
+
+  .api-schema {
+    @apply flex flex-wrap gap-2;
+  }
+
+  .api-schema span {
+    @apply inline-flex min-h-8 items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-2.5 text-sm font-medium text-zinc-800;
+  }
+
+  .api-schema small {
+    @apply text-xs font-semibold uppercase tracking-wide text-zinc-500;
+  }
+
+  .api-sample {
+    @apply max-h-80 overflow-auto rounded-lg border border-zinc-200 bg-zinc-950 p-4 font-mono text-xs leading-relaxed text-zinc-100;
+  }
+
   .voice-input-control {
     @apply relative;
   }
@@ -1815,6 +1884,10 @@
 
     .benchmark-access-cards dl {
       @apply grid-cols-2;
+    }
+
+    .api-endpoint {
+      @apply grid-cols-1;
     }
 
     .spreadsheet-row {

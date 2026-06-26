@@ -135,6 +135,12 @@ export class AgentThink extends Think<Env> {
     if (url.pathname.endsWith("/traces")) return json({ traces: this.listTraces(url.searchParams.get("since")) });
     if (url.pathname.endsWith("/extraction-trace")) return json({ traces: this.listExtractionTraces() });
     if (url.pathname.endsWith("/agent-database") && request.method === "GET") return json(this.listAgentDatabaseTables());
+    if (url.pathname.endsWith("/api-feed") && request.method === "GET") return json(this.getAgentApiFeed(url.searchParams.get("agentId")));
+    if (url.pathname.endsWith("/api-feed-table") && request.method === "GET") {
+      const tableName = url.searchParams.get("table");
+      if (!tableName) return json({ error: "Missing table query parameter." }, { status: 400 });
+      return this.getAgentApiFeedTable(tableName, url.searchParams);
+    }
     if (url.pathname.endsWith("/report") && request.method === "GET") return json({ report: this.getAgentReport() });
     if (url.pathname.endsWith("/report") && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as { prompt?: unknown };
@@ -1024,6 +1030,121 @@ export class AgentThink extends Think<Env> {
       sourceName: table.source_name,
       table: table.table_name,
     };
+  }
+
+  private getAgentApiFeed(agentId?: string | null) {
+    this.ensureAgentSchema();
+    const metadata = this.sql<{ description: string; id: string; name: string; updated_at: string }>`SELECT id, name, description, updated_at FROM agent_metadata LIMIT 1`[0] ?? null;
+    const tables = this.sql<{
+      category: string | null;
+      columns_json: string;
+      metadata_json: string | null;
+      row_count: number;
+      source_name: string | null;
+      table_kind: string;
+      table_name: string;
+      updated_at: string;
+    }>`
+      SELECT table_name, COALESCE(source_name, table_kind) AS source_name, category, columns_json, row_count, table_kind, metadata_json, updated_at
+      FROM agent_table_mappings
+      ORDER BY table_kind, table_name
+    `;
+    const resolvedAgentId = agentId || this.agentIdFromName();
+    return {
+      agent: metadata,
+      generatedAt: new Date().toISOString(),
+      tables: tables.map((table) => {
+        const rows = this.cleanedRowsForTable(table.table_name, 5, 0);
+        const columns = parseStringArray(table.columns_json);
+        return {
+          apiUrl: `/api/agents/${resolvedAgentId}/feed/${encodeURIComponent(table.table_name)}`,
+          category: table.category,
+          columns: columns.map((column) => ({ name: column, type: this.inferApiColumnType(rows, column) })),
+          csvUrl: `/api/agents/${resolvedAgentId}/feed/${encodeURIComponent(table.table_name)}?format=csv`,
+          metadata: this.parseJsonObject(table.metadata_json),
+          publicUrl: `/public/agents/${resolvedAgentId}/feed/${encodeURIComponent(table.table_name)}`,
+          rowCount: table.row_count,
+          sampleRows: rows,
+          sourceName: table.source_name,
+          table: table.table_name,
+          tableKind: table.table_kind,
+          updatedAt: table.updated_at,
+        };
+      }),
+      version: 1,
+    };
+  }
+
+  private getAgentApiFeedTable(tableName: string, searchParams: URLSearchParams) {
+    this.ensureAgentSchema();
+    const table = this.sql<{ columns_json: string; metadata_json: string | null; row_count: number; source_name: string | null; table_kind: string; table_name: string; updated_at: string }>`
+      SELECT table_name, COALESCE(source_name, table_kind) AS source_name, columns_json, row_count, table_kind, metadata_json, updated_at
+      FROM agent_table_mappings
+      WHERE table_name = ${tableName}
+      LIMIT 1
+    `[0];
+    if (!table) return json({ error: "Table not found." }, { status: 404 });
+    const limit = this.clampInteger(searchParams.get("limit"), 100, 1, 1000);
+    const offset = this.clampInteger(searchParams.get("offset"), 0, 0, 1_000_000);
+    const rows = this.cleanedRowsForTable(tableName, limit, offset);
+    const columns = parseStringArray(table.columns_json);
+    const format = searchParams.get("format")?.toLowerCase();
+    if (format === "csv") {
+      const csv = this.rowsToCsv(columns, rows);
+      return new Response(csv, {
+        headers: {
+          "content-disposition": `inline; filename="${this.safeSqlIdentifier(tableName)}.csv"`,
+          "content-type": "text/csv; charset=utf-8",
+        },
+      });
+    }
+    return json({
+      columns: columns.map((column) => ({ name: column, type: this.inferApiColumnType(rows, column) })),
+      limit,
+      metadata: this.parseJsonObject(table.metadata_json),
+      offset,
+      rowCount: table.row_count,
+      rows,
+      sourceName: table.source_name,
+      table: table.table_name,
+      tableKind: table.table_kind,
+      updatedAt: table.updated_at,
+    });
+  }
+
+  private cleanedRowsForTable(tableName: string, limit: number, offset: number) {
+    return [...this.ctx.storage.sql.exec(`SELECT * FROM ${this.quoteIdentifier(tableName)} LIMIT ? OFFSET ?`, limit, offset)].map((row) =>
+      Object.fromEntries(Object.entries(row as Record<string, unknown>).map(([key, value]) => [key, this.cleanApiValue(value)])),
+    );
+  }
+
+  private cleanApiValue(value: unknown): string | number | boolean | null {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "number" || typeof value === "boolean") return value;
+    const text = String(value).trim();
+    if (!text) return null;
+    if (/^(true|false)$/i.test(text)) return text.toLowerCase() === "true";
+    if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(text) && !/^0\d+/.test(text.replace("-", ""))) {
+      const number = Number(text);
+      if (Number.isFinite(number)) return number;
+    }
+    return text;
+  }
+
+  private inferApiColumnType(rows: Array<Record<string, unknown>>, column: string) {
+    const values = rows.map((row) => row[column]).filter((value) => value !== null && value !== undefined);
+    if (values.length === 0) return "string";
+    if (values.every((value) => typeof value === "number")) return "number";
+    if (values.every((value) => typeof value === "boolean")) return "boolean";
+    return "string";
+  }
+
+  private rowsToCsv(columns: string[], rows: Array<Record<string, unknown>>) {
+    const escape = (value: unknown) => {
+      const text = value === null || value === undefined ? "" : String(value);
+      return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    return [columns.map(escape).join(","), ...rows.map((row) => columns.map((column) => escape(row[column])).join(","))].join("\n");
   }
 
   private queryAgentDatabase(sql: string) {

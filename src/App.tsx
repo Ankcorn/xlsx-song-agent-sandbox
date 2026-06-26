@@ -17,6 +17,7 @@ import {
   Bot,
   BarChart3,
   Clock,
+  Copy,
   Database,
   Download,
   FileSpreadsheet,
@@ -143,6 +144,33 @@ type AgentSong = {
 
 type AgentSongResponse = {
   song: AgentSong | null;
+};
+
+type AgentApiFeedTable = {
+  apiUrl: string;
+  category?: string | null;
+  columns: Array<{ name: string; type: string }>;
+  csvUrl: string;
+  metadata?: Record<string, unknown> | null;
+  publicUrl: string;
+  rowCount: number;
+  sampleRows: Record<string, unknown>[];
+  sourceName?: string | null;
+  table: string;
+  tableKind: string;
+  updatedAt: string;
+};
+
+type AgentApiFeedResponse = {
+  agent: {
+    description: string;
+    id: string;
+    name: string;
+    updated_at: string;
+  } | null;
+  generatedAt: string;
+  tables: AgentApiFeedTable[];
+  version: number;
 };
 
 type AgentTrace = {
@@ -3514,6 +3542,10 @@ function AgentChatPage() {
             <Music size={16} />
             <span>Edit song</span>
           </Link>
+          <Link className="nav-button" params={{ agentId }} to="/agents/$agentId/api">
+            <Database size={16} />
+            <span>API feed</span>
+          </Link>
           <Button
             disabled={isGeneratingReport}
             icon={<FileText size={16} />}
@@ -3710,6 +3742,150 @@ function AgentSongPage() {
 function AgentSongEditPage() {
   const { agentId } = useParams({ from: "/agents/$agentId/song/edit" });
   return <AgentSongView agentId={agentId} mode="edit" />;
+}
+
+function AgentApiPage() {
+  const { agentId } = useParams({ from: "/agents/$agentId/api" });
+  const [agentRecord, setAgentRecord] = useState<LibraryAgent | null>(null);
+  const [feed, setFeed] = useState<AgentApiFeedResponse | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    let isMounted = true;
+    async function loadApiFeed() {
+      try {
+        const [agentData, feedData] = await Promise.all([
+          fetchJson<LibraryAgentResponse>(`/api/agents/${agentId}`),
+          fetchJson<AgentApiFeedResponse>(`/api/agents/${agentId}/feed`),
+        ]);
+        if (!isMounted) return;
+        setAgentRecord(agentData.agent);
+        setFeed(feedData);
+        setError(null);
+      } catch (caught) {
+        if (isMounted) setError(caught instanceof Error ? caught.message : "Could not load API feed");
+      } finally {
+        if (isMounted) setIsLoading(false);
+      }
+    }
+    void loadApiFeed();
+    return () => {
+      isMounted = false;
+    };
+  }, [agentId]);
+
+  async function copyUrl(label: string, url: string) {
+    const absolute = absoluteApiUrl(url);
+    await navigator.clipboard?.writeText(absolute).catch(() => undefined);
+    setCopied(label);
+    window.setTimeout(() => setCopied((current) => (current === label ? null : current)), 1800);
+  }
+
+  const manifestUrl = `/api/agents/${agentId}/feed`;
+  const publicManifestUrl = `/public/agents/${agentId}/feed`;
+
+  return (
+    <section className="content-band api-page">
+      <Link to="/agents/$agentId" params={{ agentId }} className="back-link">
+        <ArrowLeft size={18} />
+        <span>Agent</span>
+      </Link>
+      <header className="section-header">
+        <div>
+          <p className="eyebrow">Agent API</p>
+          <h1>{agentRecord?.name ?? feed?.agent?.name ?? "API feed"}</h1>
+          <p className="muted">Cleaned JSON and CSV feeds generated from this agent's normalized database.</p>
+        </div>
+      </header>
+
+      {error ? <Banner variant="error" title="API feed error" description={error} /> : null}
+      {isLoading ? (
+        <div className="status-line">
+          <Loader size="sm" />
+          <span>Loading API feed</span>
+        </div>
+      ) : feed ? (
+        <>
+          <section className="api-summary-grid">
+            <article>
+              <Database size={20} />
+              <span>Tables</span>
+              <strong>{feed.tables.length}</strong>
+            </article>
+            <article>
+              <Table2 size={20} />
+              <span>Rows</span>
+              <strong>{formatNumber(feed.tables.reduce((sum, table) => sum + table.rowCount, 0))}</strong>
+            </article>
+            <article>
+              <Clock size={20} />
+              <span>Generated</span>
+              <strong>{formatDateTime(feed.generatedAt)}</strong>
+            </article>
+          </section>
+
+          <section className="api-endpoint-card">
+            <div>
+              <p className="eyebrow">Feed manifest</p>
+              <h2>Discover every generated endpoint</h2>
+            </div>
+            <ApiEndpoint label="Private manifest" url={manifestUrl} copied={copied} onCopy={copyUrl} />
+            <ApiEndpoint label="Public manifest" url={publicManifestUrl} copied={copied} onCopy={copyUrl} />
+          </section>
+
+          <section className="api-table-list">
+            {feed.tables.map((table) => (
+              <article className="api-table-card" key={table.table}>
+                <header>
+                  <div>
+                    <p className="eyebrow">{table.tableKind}</p>
+                    <h2>{table.table}</h2>
+                    <p className="muted">{table.rowCount.toLocaleString()} rows · {table.sourceName ?? "agent table"}</p>
+                  </div>
+                  <Badge variant="neutral">{table.columns.length} columns</Badge>
+                </header>
+                <div className="api-endpoint-stack">
+                  <ApiEndpoint label="JSON" url={table.apiUrl} copied={copied} onCopy={copyUrl} />
+                  <ApiEndpoint label="CSV" url={table.csvUrl} copied={copied} onCopy={copyUrl} />
+                  <ApiEndpoint label="Public JSON" url={table.publicUrl} copied={copied} onCopy={copyUrl} />
+                </div>
+                <div className="api-schema">
+                  {table.columns.slice(0, 12).map((column) => (
+                    <span key={column.name}>{column.name}<small>{column.type}</small></span>
+                  ))}
+                </div>
+                {table.sampleRows.length > 0 ? (
+                  <pre className="api-sample">{JSON.stringify(table.sampleRows.slice(0, 2), null, 2)}</pre>
+                ) : (
+                  <p className="muted">No sample rows available.</p>
+                )}
+              </article>
+            ))}
+          </section>
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function absoluteApiUrl(url: string) {
+  if (/^https?:\/\//i.test(url)) return url;
+  return `${window.location.origin}${url}`;
+}
+
+function ApiEndpoint({ copied, label, onCopy, url }: { copied: string | null; label: string; onCopy: (label: string, url: string) => void; url: string }) {
+  const absolute = absoluteApiUrl(url);
+  return (
+    <div className="api-endpoint">
+      <span>{label}</span>
+      <code>{absolute}</code>
+      <Button icon={<Copy size={15} />} size="sm" type="button" variant="secondary" onClick={() => void onCopy(label, url)}>
+        {copied === label ? "Copied" : "Copy"}
+      </Button>
+    </div>
+  );
 }
 
 function AgentReportView({ agentId, mode }: { agentId: string; mode: "edit" | "public" }) {
@@ -4870,6 +5046,12 @@ const agentSongEditRoute = createRoute({
   path: "/agents/$agentId/song/edit",
 });
 
+const agentApiRoute = createRoute({
+  component: AgentApiPage,
+  getParentRoute: () => rootRoute,
+  path: "/agents/$agentId/api",
+});
+
 const benchmarkRoute = createRoute({
   component: BenchmarkDashboardPage,
   getParentRoute: () => rootRoute,
@@ -4899,6 +5081,7 @@ const routeTree = rootRoute.addChildren([
   agentReportEditRoute,
   agentSongRoute,
   agentSongEditRoute,
+  agentApiRoute,
   benchmarkRoute,
   spreadsheetRoute,
   spreadsheetUploadFlowRoute,

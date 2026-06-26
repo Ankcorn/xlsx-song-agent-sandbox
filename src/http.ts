@@ -2652,12 +2652,45 @@ export default {
       return stub.fetch("https://agent.local/agent-database");
     }
 
+    const agentFeedMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/feed$/);
+    if (agentFeedMatch && request.method === "GET") {
+      const agent = await getLibraryAgentRow(env, agentFeedMatch[1]);
+      if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+      const feedUrl = new URL("https://agent.local/api-feed");
+      feedUrl.searchParams.set("agentId", agentFeedMatch[1]);
+      const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
+      return stub.fetch(feedUrl);
+    }
+
+    const agentFeedTableMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/feed\/([^/]+)$/);
+    if (agentFeedTableMatch && request.method === "GET") {
+      const agent = await getLibraryAgentRow(env, agentFeedTableMatch[1]);
+      if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+      const feedUrl = new URL("https://agent.local/api-feed-table");
+      feedUrl.searchParams.set("table", decodeURIComponent(agentFeedTableMatch[2]));
+      feedUrl.searchParams.set("limit", url.searchParams.get("limit") ?? "");
+      feedUrl.searchParams.set("offset", url.searchParams.get("offset") ?? "");
+      feedUrl.searchParams.set("format", url.searchParams.get("format") ?? "");
+      const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
+      return stub.fetch(feedUrl);
+    }
+
     const publicAgentTablesMatch = url.pathname.match(/^\/public\/agents\/([^/]+)\/tables$/);
     if (publicAgentTablesMatch && request.method === "GET") {
       const agent = await getLibraryAgentRow(env, publicAgentTablesMatch[1]);
       if (!agent) return json({ error: "Agent not found" }, { status: 404 });
       const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
       return stub.fetch("https://agent.local/agent-database");
+    }
+
+    const publicAgentFeedMatch = url.pathname.match(/^\/public\/agents\/([^/]+)\/feed$/);
+    if (publicAgentFeedMatch && request.method === "GET") {
+      const agent = await getLibraryAgentRow(env, publicAgentFeedMatch[1]);
+      if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+      const feedUrl = new URL("https://agent.local/api-feed");
+      feedUrl.searchParams.set("agentId", publicAgentFeedMatch[1]);
+      const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
+      return stub.fetch(feedUrl);
     }
 
     const agentTableMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/tables\/([^/]+)$/);
@@ -2668,6 +2701,19 @@ export default {
       tableUrl.searchParams.set("table", decodeURIComponent(agentTableMatch[2]));
       const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
       return stub.fetch(tableUrl);
+    }
+
+    const publicAgentFeedTableMatch = url.pathname.match(/^\/public\/agents\/([^/]+)\/feed\/([^/]+)$/);
+    if (publicAgentFeedTableMatch && request.method === "GET") {
+      const agent = await getLibraryAgentRow(env, publicAgentFeedTableMatch[1]);
+      if (!agent) return json({ error: "Agent not found" }, { status: 404 });
+      const feedUrl = new URL("https://agent.local/api-feed-table");
+      feedUrl.searchParams.set("table", decodeURIComponent(publicAgentFeedTableMatch[2]));
+      feedUrl.searchParams.set("limit", url.searchParams.get("limit") ?? "");
+      feedUrl.searchParams.set("offset", url.searchParams.get("offset") ?? "");
+      feedUrl.searchParams.set("format", url.searchParams.get("format") ?? "");
+      const stub = env.AgentThink.get(env.AgentThink.idFromName(agent.agent_name));
+      return stub.fetch(feedUrl);
     }
 
     const publicAgentTableMatch = url.pathname.match(/^\/public\/agents\/([^/]+)\/tables\/([^/]+)$/);
